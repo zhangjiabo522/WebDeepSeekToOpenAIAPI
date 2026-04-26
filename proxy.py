@@ -2,7 +2,7 @@
 DeepSeek 网页 → API 代理（纯 HTTP 转发，无浏览器依赖）
 用法: python proxy.py → 打开 http://localhost:8000/admin
 """
-import json, os, shlex, time, uuid, webbrowser, base64, re, secrets, asyncio, random, textwrap
+import json, os, shlex, time, uuid, webbrowser, base64, re, secrets, asyncio, random, threading, queue
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
@@ -31,32 +31,36 @@ SETTINGS_FILE = BASE_DIR / "settings.json"
 token_json = BASE_DIR / "token.json"
 PROXY_PORT = int(os.getenv("PROXY_PORT", "8000"))
 
-# ── 全局日志队列 ───────────────────────────────────────
-_log_queue: asyncio.Queue = asyncio.Queue()
-_log_listeners: List[asyncio.Queue] = []
+# ── 全局日志队列（线程安全）───────────────────────────
+_log_queue: queue.Queue = queue.Queue(maxsize=500)
+_log_listeners: List[queue.Queue] = []
+_log_lock = threading.Lock()
 
 
 def log_event(level: str, message: str):
-    """推送日志到所有监听器。"""
+    """推送日志到所有监听器（线程安全）。"""
     ts = time.strftime("%H:%M:%S")
     entry = {"time": ts, "level": level, "message": message}
     # 推送到内存队列（最多保留 500 条）
-    if _log_queue.qsize() > 500:
+    try:
+        _log_queue.put_nowait(entry)
+    except queue.Full:
         try:
             _log_queue.get_nowait()
-        except asyncio.QueueEmpty:
+            _log_queue.put_nowait(entry)
+        except queue.Empty:
             pass
-    _log_queue.put_nowait(entry)
     # 推送到 SSE 监听器
-    dead = []
-    for q in _log_listeners:
-        try:
-            q.put_nowait(entry)
-        except asyncio.QueueFull:
-            dead.append(q)
-    for q in dead:
-        if q in _log_listeners:
-            _log_listeners.remove(q)
+    with _log_lock:
+        dead = []
+        for q in list(_log_listeners):
+            try:
+                q.put_nowait(entry)
+            except queue.Full:
+                dead.append(q)
+        for q in dead:
+            if q in _log_listeners:
+                _log_listeners.remove(q)
 
 
 def log_info(msg: str):
@@ -320,12 +324,7 @@ hr{border:none;border-top:1px solid #334155;margin:16px 0}
   </div>
   <div class="card">
     <div class="card-title">默认模型</div>
-    <select id="defaultModel">
-      <option value="deepseek-default（v4-flash基础）">deepseek-default（v4-flash基础）</option>
-      <option value="deepseek-reasoner（v4-flash思考模式）">deepseek-reasoner（v4-flash思考模式）</option>
-      <option value="deepseek-search（v4-flash联网搜索）">deepseek-search（v4-flash联网搜索）</option>
-      <option value="deepseek-reasoner-search（v4-flash思考+联网）">deepseek-reasoner-search（v4-flash思考+联网）</option>
-    </select>
+    <select id="defaultModel"></select>
   </div>
   <button class="btn bp" onclick="saveSettings()" style="width:100%">保存设置</button>
 </div>
@@ -334,12 +333,7 @@ hr{border:none;border-top:1px solid #334155;margin:16px 0}
 <div id="panel-chat" class="panel">
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
     <span style="font-size:13px;color:#94a3b8">与模型对话</span>
-    <select id="chatModel" style="width:auto;min-width:200px">
-      <option value="deepseek-default（v4-flash基础）">deepseek-default（v4-flash基础）</option>
-      <option value="deepseek-reasoner（v4-flash思考模式）">deepseek-reasoner（v4-flash思考模式）</option>
-      <option value="deepseek-search（v4-flash联网搜索）">deepseek-search（v4-flash联网搜索）</option>
-      <option value="deepseek-reasoner-search（v4-flash思考+联网）">deepseek-reasoner-search（v4-flash思考+联网）</option>
-    </select>
+    <select id="chatModel" style="width:auto;min-width:200px"></select>
   </div>
   <div id="chatBox" class="chat-box"><div class="empty">开始和 DeepSeek 对话吧</div></div>
   <div class="chat-input">
@@ -445,17 +439,33 @@ async function refreshModels(){
   try{
     const r=await fetch('/v1/models/refresh',{method:'POST'});
     const d=await r.json();
+    updateModelSelects(d.data);
     const names=d.data.map(m=>m.id).join(', ');
     info.style.display='block';info.innerHTML='发现 '+d.data.length+' 个模型: '+names;toast('刷新成功');
   }catch(e){info.style.display='block';info.innerHTML='失败: '+e.message;toast('刷新失败',1)}
   btn.disabled=false;btn.textContent='刷新模型列表';
+}
+async function loadModels(){
+  try{
+    const r=await fetch('/v1/models');const d=await r.json();
+    updateModelSelects(d.data);
+  }catch(e){}
+}
+function updateModelSelects(models){
+  if(!models||models.length===0)return;
+  const def=$('defaultModel'),chat=$('chatModel');
+  const curDef=def.value,curChat=chat.value;
+  const opts=models.map(m=>`<option value="${m.id}">${m.id}</option>`).join('');
+  def.innerHTML=opts;chat.innerHTML=opts;
+  if(models.find(m=>m.id===curDef))def.value=curDef;
+  if(models.find(m=>m.id===curChat))chat.value=curChat;
 }
 
 // 日志 SSE
 let _evtSource=null;
 function startLogStream(){
   if(_evtSource)return;
-  const box=$('logBox');box.innerHTML='';
+  const box=$('logBox');
   _evtSource=new EventSource('/api/log/stream');
   _evtSource.onmessage=e=>{
     const d=JSON.parse(e.data);
@@ -543,7 +553,11 @@ async function sendChat(){
 $('chatInput').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendChat();}});
 
 // 初始化
-loadAccounts();loadSettings();
+(async function init(){
+  await loadModels();
+  loadAccounts();
+  loadSettings();
+})();
 </script>
 </body>
 </html>"""
@@ -682,14 +696,30 @@ async def deepseek_login(data: dict):
             timeout=30,
         )
 
-        login_data = login_resp.json()
+        if login_resp is None:
+            return {"ok": False, "error": "登录请求失败，无响应"}
+
+        try:
+            login_data = login_resp.json()
+        except (json.JSONDecodeError, ValueError, AttributeError) as e:
+            log_error(f"登录响应解析失败: {e}, body={login_resp.text[:300] if hasattr(login_resp, 'text') else 'N/A'}")
+            return {"ok": False, "error": "登录响应解析失败"}
+
+        if not isinstance(login_data, dict):
+            log_error(f"登录响应类型异常: {type(login_data)}")
+            return {"ok": False, "error": "登录响应格式异常"}
+
         if login_resp.status_code != 200 or login_data.get("code", 0) != 0:
             err_msg = login_data.get("msg", login_data.get("message", f"HTTP {login_resp.status_code}"))
             log_error(f"登录失败: {err_msg}")
             return {"ok": False, "error": f"登录失败: {err_msg}"}
 
-        token = login_data.get("data", {}).get("biz_data", {}).get("user", {}).get("token", "")
+        # 安全取值，处理 None 值
+        biz_data = (login_data.get("data") or {}).get("biz_data") or {}
+        user_data = biz_data.get("user") or {}
+        token = user_data.get("token", "")
         if not token:
+            log_error(f"未获取到 token, biz_data keys: {list(biz_data.keys()) if biz_data else 'None'}")
             return {"ok": False, "error": "登录成功但未获取到 token"}
 
         log_info(f"Token 获取成功: {token[:20]}...{token[-8:]}")
@@ -705,9 +735,13 @@ async def deepseek_login(data: dict):
 
         session_id = ""
         if session_resp.status_code == 200:
-            session_data = session_resp.json()
-            session_id = session_data.get("data", {}).get("biz_data", {}).get("id", "")
-            log_info(f"Session 创建成功: {session_id}")
+            try:
+                session_data = session_resp.json()
+                biz = (session_data.get("data") or {}).get("biz_data") or {}
+                session_id = biz.get("id", "")
+                log_info(f"Session 创建成功: {session_id}")
+            except Exception as e:
+                log_warn(f"Session 解析失败: {e}")
         else:
             log_warn(f"Session 创建失败: {session_resp.status_code}")
 
@@ -771,8 +805,9 @@ async def save_settings(data: dict):
 # ── 日志 SSE ─────────────────────────────────────────────
 @app.get("/api/log/stream")
 async def log_stream(request: Request):
-    q: asyncio.Queue = asyncio.Queue(maxsize=200)
-    _log_listeners.append(q)
+    q: queue.Queue = queue.Queue(maxsize=200)
+    with _log_lock:
+        _log_listeners.append(q)
 
     async def event_generator():
         try:
@@ -780,13 +815,14 @@ async def log_stream(request: Request):
                 if await request.is_disconnected():
                     break
                 try:
-                    entry = await asyncio.wait_for(q.get(), timeout=1.0)
+                    entry = await asyncio.get_event_loop().run_in_executor(None, lambda: q.get(timeout=1))
                     yield f"data: {json.dumps(entry, ensure_ascii=False)}\n\n"
-                except asyncio.TimeoutError:
+                except queue.Empty:
                     yield ": keepalive\n\n"
         finally:
-            if q in _log_listeners:
-                _log_listeners.remove(q)
+            with _log_lock:
+                if q in _log_listeners:
+                    _log_listeners.remove(q)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
@@ -981,13 +1017,26 @@ def relogin(cfg: dict) -> dict | None:
             impersonate="chrome120",
             timeout=30,
         )
-        login_data = login_resp.json()
+
+        if login_resp is None:
+            return None
+
+        try:
+            login_data = login_resp.json()
+        except (json.JSONDecodeError, ValueError, AttributeError):
+            return None
+
+        if not isinstance(login_data, dict):
+            return None
+
         if login_resp.status_code != 200 or login_data.get("code", 0) != 0:
             err_msg = login_data.get("msg", f"HTTP {login_resp.status_code}")
             log_error(f"自动登录失败: {err_msg}")
             return None
 
-        token = login_data.get("data", {}).get("biz_data", {}).get("user", {}).get("token", "")
+        biz_data = (login_data.get("data") or {}).get("biz_data") or {}
+        user_data = biz_data.get("user") or {}
+        token = user_data.get("token", "")
         if not token:
             log_error("自动登录成功但未获取到 token")
             return None
@@ -1004,9 +1053,13 @@ def relogin(cfg: dict) -> dict | None:
         )
         session_id = ""
         if session_resp.status_code == 200:
-            session_data = session_resp.json()
-            session_id = session_data.get("data", {}).get("biz_data", {}).get("id", "")
-            log_info(f"新 session: {session_id}")
+            try:
+                session_data = session_resp.json()
+                biz = (session_data.get("data") or {}).get("biz_data") or {}
+                session_id = biz.get("id", "")
+                log_info(f"新 session: {session_id}")
+            except Exception as e:
+                log_warn(f"Session 解析失败: {e}")
         else:
             log_warn(f"Session 创建失败: {session_resp.status_code}")
 
