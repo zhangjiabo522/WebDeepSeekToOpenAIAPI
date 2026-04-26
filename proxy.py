@@ -1070,18 +1070,7 @@ async def frontend_chat(request: Request):
     t0 = time.time()
     result = _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream,
                     is_retry=False, has_tools=False, tools=None)
-    elapsed_ms = int((time.time() - t0) * 1000)
-    if isinstance(result, StreamingResponse):
-        output_tokens = input_tokens
-    else:
-        try:
-            body = json.loads(result.body) if hasattr(result, 'body') else {}
-            content = body.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
-            output_tokens = max(1, len(content))
-        except Exception:
-            output_tokens = input_tokens
-    track_api_call(model, stream, input_tokens, output_tokens, elapsed_ms)
-    return result
+    return _track_and_return(result, t0, model, stream, input_tokens)
 
 
 # ── Health ───────────────────────────────────────────────
@@ -1485,18 +1474,48 @@ async def chat(request: Request):
     t0 = time.time()
     result = _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream,
                     is_retry=False, has_tools=bool(tools), tools=tools)
-    elapsed_ms = int((time.time() - t0) * 1000)
+    return _track_and_return(result, t0, model, stream, input_tokens)
+
+
+def _track_and_return(result, t0, model, stream, input_tokens):
+    """追踪统计并返回响应。对 StreamingResponse 包裹以计数输出 token。"""
     if isinstance(result, StreamingResponse):
-        output_tokens = input_tokens
+        orig_iter = result.body_iterator
+
+        async def _counting_iter():
+            buf = ""
+            async for chunk in orig_iter:
+                if isinstance(chunk, bytes):
+                    chunk = chunk.decode("utf-8", errors="ignore")
+                buf += chunk
+                yield chunk
+            parts = []
+            for line in buf.split("\n"):
+                if line.startswith("data: "):
+                    try:
+                        obj = json.loads(line[6:])
+                        c = obj.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                        if c:
+                            parts.append(c)
+                    except Exception:
+                        pass
+            output_tokens = max(1, len("".join(parts)))
+            elapsed_ms = int((time.time() - t0) * 1000)
+            track_api_call(model, True, input_tokens, output_tokens, elapsed_ms)
+
+        return StreamingResponse(_counting_iter(), media_type=result.media_type,
+                                 headers=dict(result.headers),
+                                 background=result.background)
     else:
+        elapsed_ms = int((time.time() - t0) * 1000)
         try:
             body = json.loads(result.body) if hasattr(result, 'body') else {}
             content = body.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
             output_tokens = max(1, len(content))
         except Exception:
             output_tokens = input_tokens
-    track_api_call(model, stream, input_tokens, output_tokens, elapsed_ms)
-    return result
+        track_api_call(model, stream, input_tokens, output_tokens, elapsed_ms)
+        return result
 
 
 def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_retry=False, has_tools=False, tools=None):
