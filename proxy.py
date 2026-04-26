@@ -84,7 +84,6 @@ _stats_lock = threading.Lock()
 
 
 def _load_stats() -> dict:
-    """加载统计数据。"""
     defaults = {"total_requests": 0, "total_input_tokens": 0, "total_output_tokens": 0,
                  "total_response_ms": 0, "by_date": {}, "records": []}
     if STATS_FILE.exists():
@@ -97,24 +96,20 @@ def _load_stats() -> dict:
 
 
 def _save_stats(data: dict):
-    """保存统计数据。"""
     STATS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), "utf-8")
 
 
 def track_api_call(model: str, stream: bool, input_tokens: int, output_tokens: int, elapsed_ms: int):
-    """记录一次 API 调用的统计数据，持久化到文件。"""
     today = time.strftime("%Y-%m-%d")
     now = time.strftime("%Y-%m-%d %H:%M:%S")
     record = {"time": now, "model": model, "stream": stream,
               "input_tokens": input_tokens, "output_tokens": output_tokens, "elapsed_ms": elapsed_ms}
-
     with _stats_lock:
         s = _load_stats()
         s["total_requests"] += 1
         s["total_input_tokens"] += input_tokens
         s["total_output_tokens"] += output_tokens
         s["total_response_ms"] += elapsed_ms
-
         if today not in s["by_date"]:
             s["by_date"][today] = {"requests": 0, "input_tokens": 0, "output_tokens": 0, "response_ms": 0}
         day = s["by_date"][today]
@@ -122,24 +117,19 @@ def track_api_call(model: str, stream: bool, input_tokens: int, output_tokens: i
         day["input_tokens"] += input_tokens
         day["output_tokens"] += output_tokens
         day["response_ms"] += elapsed_ms
-
-        # 保留最近 1000 条详细记录
         s["records"].append(record)
         if len(s["records"]) > 1000:
             s["records"] = s["records"][-1000:]
-
         _save_stats(s)
 
 
 def get_stats_summary() -> dict:
-    """获取统计摘要。"""
     today = time.strftime("%Y-%m-%d")
     s = _load_stats()
     total = s.get("total_requests", 0)
     total_ms = s.get("total_response_ms", 0)
     today_data = s.get("by_date", {}).get(today, {"requests": 0, "input_tokens": 0, "output_tokens": 0, "response_ms": 0})
-    records = s.get("records", [])[-50:]  # 最近50条
-
+    records = s.get("records", [])[-50:]
     return {
         "today": {
             "requests": today_data["requests"],
@@ -153,7 +143,7 @@ def get_stats_summary() -> dict:
             "output_tokens": s.get("total_output_tokens", 0),
             "avg_response_ms": total_ms // total if total else 0,
         },
-        "recent": records[::-1],  # 最新的在前面
+        "recent": records[::-1],
     }
 
 
@@ -373,6 +363,64 @@ hr{border:none;border-top:1px solid #334155;margin:16px 0}
     <div id="login-curl" style="display:none">
       <textarea id="curl" placeholder="粘贴 cURL ..." style="width:100%;height:100px;margin-bottom:8px"></textarea>
       <button class="btn bp" id="btn3" onclick="saveCurl()" style="width:100%">保存 cURL</button>
+    </div>
+  </div>
+
+  <hr>
+  <div class="card">
+    <div class="card-title">API 配置</div>
+    <div class="card-row"><span>API 地址</span><code onclick="cp(this)">http://localhost:""" + str(PROXY_PORT) + """/v1</code></div>
+    <div class="card-row"><span>API Key</span><code onclick="cp(this)">任意填写</code></div>
+  </div>
+  <button class="btn bg" style="width:100%;margin-top:8px" onclick="refreshModels()" id="refreshBtn">刷新模型列表</button>
+  <div id="modelsInfo" style="margin-top:8px;font-size:12px;color:#64748b;display:none"></div>
+</div>
+
+<!-- 日志 -->
+<div id="panel-log" class="panel">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+    <span style="font-size:13px;color:#94a3b8">实时日志</span>
+    <button class="btn bg" onclick="clearLogs()">清空</button>
+  </div>
+  <div id="logBox"></div>
+</div>
+
+<!-- 设置 -->
+<div id="panel-setting" class="panel">
+  <div class="card">
+    <div class="card-title">系统提示词</div>
+    <div style="font-size:12px;color:#64748b;margin-bottom:8px">每次调用 API 时自动作为 system 消息带上</div>
+    <textarea id="systemPrompt" rows="4" placeholder="输入系统提示词..."></textarea>
+  </div>
+  <div class="card">
+    <div class="card-title">多账号调用策略</div>
+    <select id="accountStrategy">
+      <option value="random">随机 (random)</option>
+      <option value="round-robin">轮询 (round-robin)</option>
+    </select>
+  </div>
+  <div class="card">
+    <div class="card-title">默认模型</div>
+    <select id="defaultModel"></select>
+  </div>
+  <div class="card">
+    <div class="card-title">API 密钥</div>
+    <div style="font-size:12px;color:#64748b;margin-bottom:8px">第三方客户端调用时需要填的 API Key（留空则不校验）</div>
+    <input type="text" id="apiKey" placeholder="sk-default">
+  </div>
+  <button class="btn bp" onclick="saveSettings()" style="width:100%">保存设置</button>
+</div>
+
+<!-- 对话 -->
+<div id="panel-chat" class="panel">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+    <span style="font-size:13px;color:#94a3b8">与模型对话</span>
+    <select id="chatModel" style="width:auto;min-width:200px"></select>
+  </div>
+  <div id="chatBox" class="chat-box"><div class="empty">开始和 DeepSeek 对话吧</div></div>
+  <div class="chat-input">
+    <textarea id="chatInput" placeholder="输入消息，Shift+Enter 换行，Enter 发送"></textarea>
+    <button class="btn bp" onclick="sendChat()" id="chatSendBtn" style="height:60px;width:80px">发送</button>
   </div>
 </div>
 
@@ -448,6 +496,8 @@ function switchTab(name){
   $('panel-'+name).classList.add('active');
   if(name==='log') startLogStream();
   else stopLogStream();
+  if(name==='stats'){refreshStats();_statsIv=setInterval(refreshStats,5000);}
+  else{if(_statsIv){clearInterval(_statsIv);_statsIv=null;}}
 }
 let _loginType='phone';
 function switchLoginType(type){
@@ -682,12 +732,6 @@ async function clearStats(){
   try{await fetch('/api/stats/clear',{method:'POST'});refreshStats();toast('已清空');}catch(e){toast(e.message,1);}
 }
 let _statsIv=null;
-function setTabAuto(name){
-  if(name==='stats'){refreshStats();_statsIv=setInterval(refreshStats,5000);}
-  else{if(_statsIv){clearInterval(_statsIv);_statsIv=null;}}
-}
-const _origSwitchTab=switchTab;
-switchTab=function(name){_origSwitchTab(name);setTabAuto(name);}
 
 // 初始化
 (async function init(){
@@ -1026,17 +1070,9 @@ async def frontend_chat(request: Request):
     t0 = time.time()
     result = _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream,
                     is_retry=False, has_tools=False, tools=None)
-    if not stream:
-        elapsed_ms = int((time.time() - t0) * 1000)
-        output_tokens = len(prompt) // 4
-        track_api_call(model, stream, input_tokens, max(1, output_tokens), elapsed_ms)
-        return result
-    # 流式: 异步记录
-    import threading as _th
-    def _track_stream():
-        elapsed_ms = int((time.time() - t0) * 1000)
-        track_api_call(model, True, input_tokens, input_tokens, elapsed_ms)
-    _th.Thread(target=_track_stream, daemon=True).start()
+    elapsed_ms = int((time.time() - t0) * 1000)
+    output_tokens = max(1, len(prompt) // 4)
+    track_api_call(model, stream, input_tokens, output_tokens, elapsed_ms)
     return result
 
 
@@ -1441,16 +1477,9 @@ async def chat(request: Request):
     t0 = time.time()
     result = _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream,
                     is_retry=False, has_tools=bool(tools), tools=tools)
-    if not stream:
-        elapsed_ms = int((time.time() - t0) * 1000)
-        output_tokens = len(prompt) // 4
-        track_api_call(model, stream, input_tokens, max(1, output_tokens), elapsed_ms)
-        return result
-    import threading as _th2
-    def _track_stream2():
-        elapsed_ms = int((time.time() - t0) * 1000)
-        track_api_call(model, True, input_tokens, input_tokens, elapsed_ms)
-    _th2.Thread(target=_track_stream2, daemon=True).start()
+    elapsed_ms = int((time.time() - t0) * 1000)
+    output_tokens = max(1, len(prompt) // 4)
+    track_api_call(model, stream, input_tokens, output_tokens, elapsed_ms)
     return result
 
 
