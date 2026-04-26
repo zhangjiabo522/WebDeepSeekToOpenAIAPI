@@ -27,6 +27,7 @@ pow_solver = DeepSeekPOW()
 BASE_DIR = Path(__file__).parent
 ACCOUNTS_FILE = BASE_DIR / "accounts.json"
 SETTINGS_FILE = BASE_DIR / "settings.json"
+STATS_FILE = BASE_DIR / "stats.json"
 # 兼容旧版单账号配置
 token_json = BASE_DIR / "token.json"
 PROXY_PORT = int(os.getenv("PROXY_PORT", "8000"))
@@ -76,6 +77,84 @@ def log_warn(msg: str):
 def log_error(msg: str):
     log_event("error", msg)
     print(f"[ERROR] {msg}")
+
+
+# ── 数据统计（持久化到 stats.json）─────────────────────
+_stats_lock = threading.Lock()
+
+
+def _load_stats() -> dict:
+    """加载统计数据。"""
+    defaults = {"total_requests": 0, "total_input_tokens": 0, "total_output_tokens": 0,
+                 "total_response_ms": 0, "by_date": {}, "records": []}
+    if STATS_FILE.exists():
+        try:
+            data = json.loads(STATS_FILE.read_text("utf-8"))
+            defaults.update(data)
+        except Exception:
+            pass
+    return defaults
+
+
+def _save_stats(data: dict):
+    """保存统计数据。"""
+    STATS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), "utf-8")
+
+
+def track_api_call(model: str, stream: bool, input_tokens: int, output_tokens: int, elapsed_ms: int):
+    """记录一次 API 调用的统计数据，持久化到文件。"""
+    today = time.strftime("%Y-%m-%d")
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    record = {"time": now, "model": model, "stream": stream,
+              "input_tokens": input_tokens, "output_tokens": output_tokens, "elapsed_ms": elapsed_ms}
+
+    with _stats_lock:
+        s = _load_stats()
+        s["total_requests"] += 1
+        s["total_input_tokens"] += input_tokens
+        s["total_output_tokens"] += output_tokens
+        s["total_response_ms"] += elapsed_ms
+
+        if today not in s["by_date"]:
+            s["by_date"][today] = {"requests": 0, "input_tokens": 0, "output_tokens": 0, "response_ms": 0}
+        day = s["by_date"][today]
+        day["requests"] += 1
+        day["input_tokens"] += input_tokens
+        day["output_tokens"] += output_tokens
+        day["response_ms"] += elapsed_ms
+
+        # 保留最近 1000 条详细记录
+        s["records"].append(record)
+        if len(s["records"]) > 1000:
+            s["records"] = s["records"][-1000:]
+
+        _save_stats(s)
+
+
+def get_stats_summary() -> dict:
+    """获取统计摘要。"""
+    today = time.strftime("%Y-%m-%d")
+    s = _load_stats()
+    total = s.get("total_requests", 0)
+    total_ms = s.get("total_response_ms", 0)
+    today_data = s.get("by_date", {}).get(today, {"requests": 0, "input_tokens": 0, "output_tokens": 0, "response_ms": 0})
+    records = s.get("records", [])[-50:]  # 最近50条
+
+    return {
+        "today": {
+            "requests": today_data["requests"],
+            "input_tokens": today_data["input_tokens"],
+            "output_tokens": today_data["output_tokens"],
+            "avg_response_ms": today_data["response_ms"] // today_data["requests"] if today_data["requests"] else 0,
+        },
+        "total": {
+            "requests": total,
+            "input_tokens": s.get("total_input_tokens", 0),
+            "output_tokens": s.get("total_output_tokens", 0),
+            "avg_response_ms": total_ms // total if total else 0,
+        },
+        "recent": records[::-1],  # 最新的在前面
+    }
 
 
 # ── cURL 解析 ──────────────────────────────────────────
@@ -245,6 +324,12 @@ hr{border:none;border-top:1px solid #334155;margin:16px 0}
 .curl-box{display:none;margin-top:10px}
 .api-info{font-size:12px;color:#64748b;margin-top:8px}
 .api-info code{background:#1e293b;padding:2px 8px;border-radius:4px;font-size:11px;color:#7dd3fc;cursor:pointer}
+.stat-card{background:#0f172a;border:1px solid #334155;border-radius:10px;padding:16px;text-align:center;flex:1;min-width:155px}
+.stat-card.total{background:#1e293b}
+.stat-num{font-size:26px;font-weight:700;color:#e2e8f0;margin-bottom:4px}
+.stat-label{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.5px}
+#statsRecords td{padding:6px 8px;border-bottom:1px solid #1e293b;color:#94a3b8;white-space:nowrap}
+#statsRecords tr:hover{background:#1e293b}
 </style>
 </head>
 <body>
@@ -258,6 +343,7 @@ hr{border:none;border-top:1px solid #334155;margin:16px 0}
 <button class="tab" onclick="switchTab('log')" id="tab-log">日志</button>
 <button class="tab" onclick="switchTab('setting')" id="tab-setting">设置</button>
 <button class="tab" onclick="switchTab('chat')" id="tab-chat">对话</button>
+<button class="tab" onclick="switchTab('stats')" id="tab-stats">统计</button>
 </div>
 
 <!-- 账号管理 -->
@@ -287,64 +373,67 @@ hr{border:none;border-top:1px solid #334155;margin:16px 0}
     <div id="login-curl" style="display:none">
       <textarea id="curl" placeholder="粘贴 cURL ..." style="width:100%;height:100px;margin-bottom:8px"></textarea>
       <button class="btn bp" id="btn3" onclick="saveCurl()" style="width:100%">保存 cURL</button>
+  </div>
+</div>
+
+<!-- 统计 -->
+<div id="panel-stats" class="panel">
+  <div style="display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap">
+    <div class="stat-card">
+      <div class="stat-num" id="stat-today-req">-</div>
+      <div class="stat-label">今日请求</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-num" id="stat-today-in">-</div>
+      <div class="stat-label">今日输入 tokens</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-num" id="stat-today-out">-</div>
+      <div class="stat-label">今日输出 tokens</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-num" id="stat-today-avg">-</div>
+      <div class="stat-label">今日平均响应</div>
     </div>
   </div>
-
-  <hr>
-  <div class="card">
-    <div class="card-title">API 配置</div>
-    <div class="card-row"><span>API 地址</span><code onclick="cp(this)">http://localhost:""" + str(PROXY_PORT) + """/v1</code></div>
-    <div class="card-row"><span>API Key</span><code onclick="cp(this)">任意填写</code></div>
+  <div style="display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap">
+    <div class="stat-card total">
+      <div class="stat-num" id="stat-total-req">-</div>
+      <div class="stat-label">总请求数</div>
+    </div>
+    <div class="stat-card total">
+      <div class="stat-num" id="stat-total-in">-</div>
+      <div class="stat-label">总输入 tokens</div>
+    </div>
+    <div class="stat-card total">
+      <div class="stat-num" id="stat-total-out">-</div>
+      <div class="stat-label">总输出 tokens</div>
+    </div>
+    <div class="stat-card total">
+      <div class="stat-num" id="stat-total-avg">-</div>
+      <div class="stat-label">总平均响应</div>
+    </div>
   </div>
-  <button class="btn bg" style="width:100%;margin-top:8px" onclick="refreshModels()" id="refreshBtn">刷新模型列表</button>
-  <div id="modelsInfo" style="margin-top:8px;font-size:12px;color:#64748b;display:none"></div>
-</div>
-
-<!-- 日志 -->
-<div id="panel-log" class="panel">
-  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-    <span style="font-size:13px;color:#94a3b8">实时日志</span>
-    <button class="btn bg" onclick="clearLogs()">清空</button>
+  <div style="margin-bottom:8px;font-size:13px;color:#94a3b8">最近调用记录</div>
+  <div style="overflow-x:auto">
+    <table style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead>
+        <tr style="border-bottom:1px solid #334155;color:#64748b">
+          <th style="padding:6px 8px;text-align:left;white-space:nowrap">时间</th>
+          <th style="padding:6px 8px;text-align:left;white-space:nowrap">模型</th>
+          <th style="padding:6px 8px;text-align:left;white-space:nowrap">流式</th>
+          <th style="padding:6px 8px;text-align:right;white-space:nowrap">输入</th>
+          <th style="padding:6px 8px;text-align:right;white-space:nowrap">输出</th>
+          <th style="padding:6px 8px;text-align:right;white-space:nowrap">耗时</th>
+        </tr>
+      </thead>
+      <tbody id="statsRecords"></tbody>
+    </table>
   </div>
-  <div id="logBox"></div>
-</div>
-
-<!-- 设置 -->
-<div id="panel-setting" class="panel">
-  <div class="card">
-    <div class="card-title">系统提示词</div>
-    <div style="font-size:12px;color:#64748b;margin-bottom:8px">每次调用 API 时自动作为 system 消息带上</div>
-    <textarea id="systemPrompt" rows="4" placeholder="输入系统提示词..."></textarea>
-  </div>
-  <div class="card">
-    <div class="card-title">多账号调用策略</div>
-    <select id="accountStrategy">
-      <option value="random">随机 (random)</option>
-      <option value="round-robin">轮询 (round-robin)</option>
-    </select>
-  </div>
-  <div class="card">
-    <div class="card-title">默认模型</div>
-    <select id="defaultModel"></select>
-  </div>
-  <div class="card">
-    <div class="card-title">API 密钥</div>
-    <div style="font-size:12px;color:#64748b;margin-bottom:8px">第三方客户端调用时需要填的 API Key（留空则不校验）</div>
-    <input type="text" id="apiKey" placeholder="sk-default">
-  </div>
-  <button class="btn bp" onclick="saveSettings()" style="width:100%">保存设置</button>
-</div>
-
-<!-- 对话 -->
-<div id="panel-chat" class="panel">
-  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-    <span style="font-size:13px;color:#94a3b8">与模型对话</span>
-    <select id="chatModel" style="width:auto;min-width:200px"></select>
-  </div>
-  <div id="chatBox" class="chat-box"><div class="empty">开始和 DeepSeek 对话吧</div></div>
-  <div class="chat-input">
-    <textarea id="chatInput" placeholder="输入消息，Shift+Enter 换行，Enter 发送"></textarea>
-    <button class="btn bp" onclick="sendChat()" id="chatSendBtn" style="height:60px;width:80px">发送</button>
+  <div style="text-align:center;margin-top:12px">
+    <span style="font-size:11px;color:#64748b">每 5 秒自动刷新</span>
+    <span style="margin-left:8px;font-size:11px;color:#64748b">|</span>
+    <button class="btn" style="background:none;color:#7dd3fc;font-size:11px;padding:0;margin-left:8px" onclick="clearStats()">清空统计</button>
   </div>
 </div>
 
@@ -560,11 +649,52 @@ async function sendChat(){
 }
 $('chatInput').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendChat();}});
 
+// 统计
+function fmtNum(n){if(n>=1e6)return (n/1e6).toFixed(1)+'M';if(n>=1e3)return (n/1e3).toFixed(1)+'K';return String(n);}
+function fmtMs(ms){if(ms>=1000)return (ms/1000).toFixed(1)+'s';return ms+'ms';}
+async function refreshStats(){
+  try{
+    const r=await fetch('/api/stats');const d=await r.json();
+    $('stat-today-req').textContent=fmtNum(d.today.requests);
+    $('stat-today-in').textContent=fmtNum(d.today.input_tokens);
+    $('stat-today-out').textContent=fmtNum(d.today.output_tokens);
+    $('stat-today-avg').textContent=fmtMs(d.today.avg_response_ms);
+    $('stat-total-req').textContent=fmtNum(d.total.requests);
+    $('stat-total-in').textContent=fmtNum(d.total.input_tokens);
+    $('stat-total-out').textContent=fmtNum(d.total.output_tokens);
+    $('stat-total-avg').textContent=fmtMs(d.total.avg_response_ms);
+    const tb=$('statsRecords');
+    if(!d.recent||d.recent.length===0){tb.innerHTML='<tr><td colspan="6" style="text-align:center;color:#475569;padding:20px">暂无记录</td></tr>';return;}
+    tb.innerHTML=d.recent.map(r=>`
+      <tr>
+        <td>${r.time.slice(5)}</td>
+        <td style="color:#7dd3fc">${r.model}</td>
+        <td>${r.stream?'流式':'同步'}</td>
+        <td style="text-align:right">${fmtNum(r.input_tokens)}</td>
+        <td style="text-align:right">${fmtNum(r.output_tokens)}</td>
+        <td style="text-align:right;color:#fbbf24">${fmtMs(r.elapsed_ms)}</td>
+      </tr>
+    `).join('');
+  }catch(e){}
+}
+async function clearStats(){
+  if(!confirm('确定清空所有统计数据？'))return;
+  try{await fetch('/api/stats/clear',{method:'POST'});refreshStats();toast('已清空');}catch(e){toast(e.message,1);}
+}
+let _statsIv=null;
+function setTabAuto(name){
+  if(name==='stats'){refreshStats();_statsIv=setInterval(refreshStats,5000);}
+  else{if(_statsIv){clearInterval(_statsIv);_statsIv=null;}}
+}
+const _origSwitchTab=switchTab;
+switchTab=function(name){_origSwitchTab(name);setTabAuto(name);}
+
 // 初始化
 (async function init(){
   await loadModels();
   loadAccounts();
   loadSettings();
+  refreshStats();
 })();
 </script>
 </body>
@@ -811,6 +941,21 @@ async def save_settings(data: dict):
     return {"ok": True}
 
 
+# ── 统计 API ────────────────────────────────────────────
+@app.get("/api/stats")
+async def api_stats():
+    return get_stats_summary()
+
+
+@app.post("/api/stats/clear")
+async def clear_stats():
+    with _stats_lock:
+        if STATS_FILE.exists():
+            STATS_FILE.unlink()
+    log_info("统计数据已清空")
+    return {"ok": True}
+
+
 # ── 日志 SSE ─────────────────────────────────────────────
 @app.get("/api/log/stream")
 async def log_stream(request: Request):
@@ -877,8 +1022,22 @@ async def frontend_chat(request: Request):
     thinking_enabled, search_enabled, _, _ = model_info
 
     prompt = convert_messages_for_deepseek(messages)
-    return _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream,
+    input_tokens = max(1, len(prompt) // 4)
+    t0 = time.time()
+    result = _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream,
                     is_retry=False, has_tools=False, tools=None)
+    if not stream:
+        elapsed_ms = int((time.time() - t0) * 1000)
+        output_tokens = len(prompt) // 4
+        track_api_call(model, stream, input_tokens, max(1, output_tokens), elapsed_ms)
+        return result
+    # 流式: 异步记录
+    import threading as _th
+    def _track_stream():
+        elapsed_ms = int((time.time() - t0) * 1000)
+        track_api_call(model, True, input_tokens, input_tokens, elapsed_ms)
+    _th.Thread(target=_track_stream, daemon=True).start()
+    return result
 
 
 # ── Health ───────────────────────────────────────────────
@@ -1278,8 +1437,21 @@ async def chat(request: Request):
         else:
             prompt = tool_prompt + "\n\n" + prompt
 
-    return _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream,
+    input_tokens = max(1, len(prompt) // 4)
+    t0 = time.time()
+    result = _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream,
                     is_retry=False, has_tools=bool(tools), tools=tools)
+    if not stream:
+        elapsed_ms = int((time.time() - t0) * 1000)
+        output_tokens = len(prompt) // 4
+        track_api_call(model, stream, input_tokens, max(1, output_tokens), elapsed_ms)
+        return result
+    import threading as _th2
+    def _track_stream2():
+        elapsed_ms = int((time.time() - t0) * 1000)
+        track_api_call(model, True, input_tokens, input_tokens, elapsed_ms)
+    _th2.Thread(target=_track_stream2, daemon=True).start()
+    return result
 
 
 def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_retry=False, has_tools=False, tools=None):
