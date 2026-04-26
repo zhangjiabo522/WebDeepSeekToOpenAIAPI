@@ -1066,12 +1066,20 @@ async def frontend_chat(request: Request):
     thinking_enabled, search_enabled, _, _ = model_info
 
     prompt = convert_messages_for_deepseek(messages)
-    input_tokens = max(1, len(prompt) // 4)
+    input_tokens = max(1, len(prompt))
     t0 = time.time()
     result = _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream,
                     is_retry=False, has_tools=False, tools=None)
     elapsed_ms = int((time.time() - t0) * 1000)
-    output_tokens = max(1, len(prompt) // 4)
+    if isinstance(result, StreamingResponse):
+        output_tokens = input_tokens
+    else:
+        try:
+            body = json.loads(result.body) if hasattr(result, 'body') else {}
+            content = body.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
+            output_tokens = max(1, len(content))
+        except Exception:
+            output_tokens = input_tokens
     track_api_call(model, stream, input_tokens, output_tokens, elapsed_ms)
     return result
 
@@ -1473,12 +1481,20 @@ async def chat(request: Request):
         else:
             prompt = tool_prompt + "\n\n" + prompt
 
-    input_tokens = max(1, len(prompt) // 4)
+    input_tokens = max(1, len(prompt))
     t0 = time.time()
     result = _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream,
                     is_retry=False, has_tools=bool(tools), tools=tools)
     elapsed_ms = int((time.time() - t0) * 1000)
-    output_tokens = max(1, len(prompt) // 4)
+    if isinstance(result, StreamingResponse):
+        output_tokens = input_tokens
+    else:
+        try:
+            body = json.loads(result.body) if hasattr(result, 'body') else {}
+            content = body.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
+            output_tokens = max(1, len(content))
+        except Exception:
+            output_tokens = input_tokens
     track_api_call(model, stream, input_tokens, output_tokens, elapsed_ms)
     return result
 
