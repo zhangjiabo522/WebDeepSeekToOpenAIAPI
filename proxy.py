@@ -166,7 +166,8 @@ def _load_settings() -> dict:
     defaults = {
         "system_prompt": "",
         "account_strategy": "random",
-        "default_model": "deepseek-default（v4-flash基础）",
+        "api_key": "sk-default",
+        "default_model": "deepseek-chat",
     }
     if SETTINGS_FILE.exists():
         try:
@@ -325,6 +326,11 @@ hr{border:none;border-top:1px solid #334155;margin:16px 0}
   <div class="card">
     <div class="card-title">默认模型</div>
     <select id="defaultModel"></select>
+  </div>
+  <div class="card">
+    <div class="card-title">API 密钥</div>
+    <div style="font-size:12px;color:#64748b;margin-bottom:8px">第三方客户端调用时需要填的 API Key（留空则不校验）</div>
+    <input type="text" id="apiKey" placeholder="sk-default">
   </div>
   <button class="btn bp" onclick="saveSettings()" style="width:100%">保存设置</button>
 </div>
@@ -485,8 +491,9 @@ async function loadSettings(){
     const r=await fetch('/api/settings');const d=await r.json();
     $('systemPrompt').value=d.system_prompt||'';
     $('accountStrategy').value=d.account_strategy||'random';
-    $('defaultModel').value=d.default_model||'deepseek-default（v4-flash基础）';
-    $('chatModel').value=d.default_model||'deepseek-default（v4-flash基础）';
+    $('defaultModel').value=d.default_model||'deepseek-chat';
+    $('chatModel').value=d.default_model||'deepseek-chat';
+    $('apiKey').value=d.api_key||'sk-default';
   }catch(e){}
 }
 async function saveSettings(){
@@ -494,6 +501,7 @@ async function saveSettings(){
     system_prompt:$('systemPrompt').value,
     account_strategy:$('accountStrategy').value,
     default_model:$('defaultModel').value,
+    api_key:$('apiKey').value,
   };
   try{
     const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
@@ -796,7 +804,8 @@ async def save_settings(data: dict):
     s = _load_settings()
     s["system_prompt"] = data.get("system_prompt", s.get("system_prompt", ""))
     s["account_strategy"] = data.get("account_strategy", s.get("account_strategy", "random"))
-    s["default_model"] = data.get("default_model", s.get("default_model", "deepseek-default（v4-flash基础）"))
+    s["api_key"] = data.get("api_key", s.get("api_key", "sk-default"))
+    s["default_model"] = data.get("default_model", s.get("default_model", "deepseek-chat"))
     _save_settings(s)
     log_info("设置已保存")
     return {"ok": True}
@@ -837,7 +846,7 @@ async def frontend_chat(request: Request):
 
     body = await request.json()
     messages = body.get("messages", [])
-    model = body.get("model", "deepseek-default（v4-flash基础）")
+    model = body.get("model", "deepseek-chat")
     stream = body.get("stream", True)
 
     settings = _load_settings()
@@ -862,7 +871,7 @@ async def frontend_chat(request: Request):
         raise HTTPException(503, "没有可用账号")
 
     # 模型解析
-    model_info = get_models().get(model, get_models().get("deepseek-default（v4-flash基础）"))
+    model_info = get_models().get(model, get_models().get("deepseek-chat"))
     if not model_info:
         model_info = (False, False, 1048576, 393216)
     thinking_enabled, search_enabled, _, _ = model_info
@@ -928,20 +937,21 @@ def _discover_models() -> dict:
             has_search = mc.get("search_feature") is not None
 
             speed = "v4-flash" if mt == "default" else "v4-pro"
+            base = "chat" if mt == "default" else mt
 
-            name = f"deepseek-{mt}（{speed}基础）" if mt != "default" else f"deepseek-default（{speed}基础）"
+            name = f"deepseek-{base}"
             models[name] = (False, False, max_in, max_out)
 
             if has_think:
-                tname = f"deepseek-reasoner（{speed}思考模式）" if mt == "default" else f"deepseek-{mt}-reasoner（{speed}思考模式）"
+                tname = f"deepseek-{base}-reasoner"
                 models[tname] = (True, False, max_in, max_out)
 
             if has_search:
-                sname = f"deepseek-search（{speed}联网搜索）" if mt == "default" else f"deepseek-{mt}-search（{speed}联网搜索）"
+                sname = f"deepseek-{base}-search"
                 models[sname] = (False, True, max_in, max_out)
 
             if has_think and has_search:
-                cname = f"deepseek-reasoner-search（{speed}思考+联网）" if mt == "default" else f"deepseek-{mt}-reasoner-search（{speed}思考+联网）"
+                cname = f"deepseek-{base}-reasoner-search"
                 models[cname] = (True, True, max_in, max_out)
 
         if models:
@@ -1145,6 +1155,32 @@ async def refresh_models():
     return {"object": "list", "data": data}
 
 
+# ── 端点别名 ───────────────────────────────────────────────
+@app.get("/models")
+async def models_alias():
+    return await models()
+
+
+@app.get("/models/{model_id}")
+async def model_detail_alias(model_id: str):
+    return await model_detail(model_id)
+
+
+@app.post("/models/refresh")
+async def refresh_models_alias():
+    return await refresh_models()
+
+
+@app.post("/chat/completions")
+async def chat_completions_alias(request: Request):
+    return await chat(request)
+
+
+@app.post("/v1/responses")
+async def responses_endpoint(request: Request):
+    return await chat(request)
+
+
 def build_request_headers(cfg: dict, session_id: str) -> dict:
     req_headers = dict(cfg.get("headers", {}))
     req_headers.pop("x-ds-pow-response", None)
@@ -1190,15 +1226,26 @@ async def chat(request: Request):
     if not _get_active_accounts():
         raise HTTPException(503, detail="请先访问 http://localhost:{}/admin 登录账号".format(PROXY_PORT))
 
+    # API Key 校验
+    settings = _load_settings()
+    api_key = settings.get("api_key", "").strip()
+    if api_key:
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.startswith("Bearer "):
+            provided_key = auth_header[7:].strip()
+        else:
+            provided_key = auth_header.strip()
+        if provided_key != api_key:
+            raise HTTPException(401, detail="Invalid API key")
+
     body = await request.json()
     messages = body.get("messages", [])
-    model = body.get("model", "deepseek-default")
+    model = body.get("model", "deepseek-chat")
     stream = body.get("stream", False)
     tools = body.get("tools", None)
 
     log_info(f"API 请求: model={model}, stream={stream}, tools={'yes' if tools else 'no'}, msgs={len(messages)}")
 
-    settings = _load_settings()
     strategy = settings.get("account_strategy", "random")
     system_prompt = settings.get("system_prompt", "").strip()
 
@@ -1217,7 +1264,7 @@ async def chat(request: Request):
     if not cfg:
         raise HTTPException(503, "没有可用账号")
 
-    model_info = get_models().get(model, get_models().get("deepseek-default（v4-flash基础）"))
+    model_info = get_models().get(model, get_models().get("deepseek-chat"))
     if not model_info:
         model_info = (False, False, 1048576, 393216)
     thinking_enabled, search_enabled, _, _ = model_info

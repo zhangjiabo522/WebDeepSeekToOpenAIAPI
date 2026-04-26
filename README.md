@@ -70,7 +70,7 @@ python proxy.py
 | 配置项 | 值 |
 |--------|-----|
 | API 地址 | `http://localhost:8000/v1` |
-| API Key | 任意填写 |
+| API Key | 在管理页面「设置」中配置（默认 `sk-default`） |
 | 模型 | 管理页面刷新后自动获取 |
 
 支持任何 OpenAI 兼容客户端：Chatbox、LobeChat、NextChat、RikkaHub 等。
@@ -80,9 +80,10 @@ python proxy.py
 | 端点 | 说明 |
 |------|------|
 | `GET /health` | 健康检查 |
-| `GET /v1/models` | 模型列表 |
-| `POST /v1/models/refresh` | 强制刷新模型列表 |
-| `POST /v1/chat/completions` | 对话（OpenAI 兼容） |
+| `GET /v1/models` `/models` | 模型列表 |
+| `POST /v1/models/refresh` `/models/refresh` | 强制刷新模型列表 |
+| `POST /v1/chat/completions` `/chat/completions` | 对话（OpenAI 兼容） |
+| `POST /v1/responses` | 对话（OpenAI Response 兼容） |
 | `GET /admin` | 管理页面 |
 | `GET /api/log/stream` | 实时日志 SSE |
 | `POST /api/chat` | 前端对话接口 |
@@ -93,10 +94,14 @@ python proxy.py
 
 | 模型名 | 功能 |
 |--------|------|
-| `deepseek-default（v4-flash基础）` | 快速对话 |
-| `deepseek-reasoner（v4-flash思考模式）` | 深度思考 |
-| `deepseek-search（v4-flash联网搜索）` | 联网搜索 |
-| `deepseek-reasoner-search（v4-flash思考+联网）` | 思考+联网 |
+| `deepseek-chat` | 快速对话（v4-flash） |
+| `deepseek-chat-reasoner` | 深度思考（v4-flash） |
+| `deepseek-chat-search` | 联网搜索（v4-flash） |
+| `deepseek-chat-reasoner-search` | 思考+联网（v4-flash） |
+| `deepseek-expert` | 专家模式（v4-pro） |
+| `deepseek-expert-reasoner` | 专家深度思考（v4-pro） |
+| `deepseek-expert-search` | 专家联网搜索（v4-pro） |
+| `deepseek-expert-reasoner-search` | 专家思考+联网（v4-pro） |
 
 ## 项目结构
 
