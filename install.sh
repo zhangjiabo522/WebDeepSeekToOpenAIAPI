@@ -2,7 +2,7 @@
 # WebDeepSeekToOpenAIAPI 一键安装脚本
 # 适配 Ubuntu/Debian + Python3
 # 用法: bash <(curl -s https://raw.githubusercontent.com/zhangjiabo522/WebDeepSeekToOpenAIAPI/master/install.sh)
-# 参数: --port 8080 指定端口，跳过交互
+# 参数: --port 8080 --web-user admin --web-pass mypass 可跳过所有交互
 set -euo pipefail
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
@@ -20,14 +20,22 @@ echo ""
 
 # ── 解析参数 ──
 PORT=""
+WEB_USER=""
+WEB_PASS=""
 for arg in "$@"; do
     case "$arg" in
         --port) ;;
         --port=*) PORT="${arg#*=}" ;;
+        --web-user) ;;
+        --web-user=*) WEB_USER="${arg#*=}" ;;
+        --web-pass) ;;
+        --web-pass=*) WEB_PASS="${arg#*=}" ;;
         *)
-            if [[ "$prev" == "--port" ]]; then
-                PORT="$arg"
-            fi
+            case "$prev" in
+                --port) PORT="$arg" ;;
+                --web-user) WEB_USER="$arg" ;;
+                --web-pass) WEB_PASS="$arg" ;;
+            esac
             ;;
     esac
     prev="$arg"
@@ -51,7 +59,9 @@ if [ -z "$PORT" ]; then
 fi
 
 # ── 设置 Web 管理后台账号密码 ──
-if [ -z "${WEB_USER:-}" ] && [ -z "${WEB_PASS:-}" ]; then
+if [ -n "$WEB_USER" ] && [ -n "$WEB_PASS" ]; then
+    info "使用命令行指定的后台账号: $WEB_USER"
+elif [ -z "${WEB_USER:-}" ] && [ -z "${WEB_PASS:-}" ]; then
     echo ""
     echo -e "设置管理后台账号密码（默认 admin/admin）："
     read -p "用户名 [admin]: " WEB_USER
@@ -186,6 +196,7 @@ echo -e "${GREEN}║    PROXY_PORT=$PORT python3 proxy.py         ║${NC}"
 echo -e "${GREEN}║    或后台: PROXY_PORT=$PORT bash deploy.sh --bg║${NC}"
 echo -e "${GREEN}╠══════════════════════════════════════════════╣${NC}"
 echo -e "${GREEN}║  管理: http://localhost:$PORT/admin         ║${NC}"
+echo -e "${GREEN}║  账号: $WEB_USER  密码: $WEB_PASS          ║${NC}"
 echo -e "${GREEN}║  API:  http://localhost:$PORT/v1            ║${NC}"
 echo -e "${GREEN}║  启动后登录 DeepSeek 账号即可使用           ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════╝${NC}"
