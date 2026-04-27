@@ -1,8 +1,8 @@
 """
 DeepSeek 网页 → API 代理（纯 HTTP 转发，无浏览器依赖）
-用法: python proxy.py → 打开 http://localhost:8000/admin
+用法: python proxy.py [--port PORT]  例如: python proxy.py --port 8080
 """
-import json, os, shlex, time, uuid, webbrowser, base64, re, secrets, asyncio, random, threading, queue
+import json, os, shlex, time, uuid, webbrowser, base64, re, secrets, asyncio, random, threading, queue, sys
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
@@ -32,6 +32,15 @@ AUTH_FILE = BASE_DIR / "auth.json"
 # 兼容旧版单账号配置
 token_json = BASE_DIR / "token.json"
 PROXY_PORT = int(os.getenv("PROXY_PORT", "8000"))
+
+# ── 命令行参数 ──
+if "--port" in sys.argv:
+    try:
+        idx = sys.argv.index("--port")
+        PROXY_PORT = int(sys.argv[idx + 1])
+    except (ValueError, IndexError):
+        print("用法: python proxy.py [--port PORT]")
+        sys.exit(1)
 
 # ── Web 认证 ─────────────────────────────────────────────
 _auth_sessions: dict = {}
