@@ -5,12 +5,14 @@
 ## 一键部署
 
 ```bash
+# 默认端口 8000
 bash <(curl -s https://raw.githubusercontent.com/zhangjiabo522/WebDeepSeekToOpenAIAPI/master/install.sh)
+
+# 指定端口（跳过交互）
+bash <(curl -s https://raw.githubusercontent.com/zhangjiabo522/WebDeepSeekToOpenAIAPI/master/install.sh) --port 8080
 ```
 
-该脚本自动安装 Python3、git、依赖包，克隆仓库并启动服务。
-
-或手动部署：
+脚本功能：安装 Python3、git、依赖 → 输入端口号 → 自动放行防火墙 → 克隆仓库 → 安装依赖 → 启动服务。或手动部署：
 
 ```bash
 git clone git@github.com:zhangjiabo522/WebDeepSeekToOpenAIAPI.git
