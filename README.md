@@ -5,17 +5,16 @@
 ## 一键部署
 
 ```bash
-# 克隆仓库
-git clone git@github.com:zhangjiabo522/WebDeepSeekToOpenAIAPI.git
-cd WebDeepSeekToOpenAIAPI
-
-# 安装依赖并启动
-bash deploy.sh
+bash <(curl -s https://raw.githubusercontent.com/zhangjiabo522/WebDeepSeekToOpenAIAPI/master/install.sh)
 ```
+
+该脚本自动安装 Python3、git、依赖包，克隆仓库并启动服务。
 
 或手动部署：
 
 ```bash
+git clone git@github.com:zhangjiabo522/WebDeepSeekToOpenAIAPI.git
+cd WebDeepSeekToOpenAIAPI
 pip install -r requirements.txt
 python proxy.py
 ```
@@ -41,6 +40,7 @@ PROXY_PORT=8080 python proxy.py
   - **日志**：SSE 实时推送服务端日志
   - **设置**：系统提示词、多账号策略、默认模型、API 密钥
   - **对话**：直接在页面与模型流式对话
+  - **统计**：今日/总计请求数、token 消耗、平均响应速度
 - **工具调用 (Tool Calling)**：支持 OpenAI 标准的 `tools` / `tool_calls`
 
 ## 使用方式
@@ -180,6 +180,8 @@ curl http://localhost:8000/health
 | `/api/settings` | GET/POST | 获取/保存系统设置 |
 | `/api/log/stream` | GET | 实时日志 SSE 流 |
 | `/api/chat` | POST | 前端对话接口 |
+| `/api/stats` | GET | 数据统计（今日/总计/明细） |
+| `/api/stats/clear` | POST | 清空统计数据 |
 | `/health` | GET | 健康检查 |
 
 ### 请求体参数（chat completions）
@@ -267,10 +269,12 @@ print(response.choices[0].message.tool_calls)
 ├── pow_solver.js       # Node.js WASM 求解器
 ├── sha3_wasm_bg.wasm   # SHA3 WASM 模块
 ├── accounts.json       # 多账号配置（自动创建）
-├── settings.json       # 系统设置（自动创建）
-├── requirements.txt    # Python 依赖
-├── deploy.sh           # 一键部署脚本
-└── README.md           # 本文件
+├── settings.json      # 系统设置（自动创建）
+├── stats.json         # 数据统计（自动创建）
+├── requirements.txt   # Python 依赖
+├── deploy.sh          # 部署/管理脚本
+├── install.sh         # 一键安装脚本（Ubuntu/Debian）
+└── README.md          # 本文件
 ```
 
 ## 环境变量
