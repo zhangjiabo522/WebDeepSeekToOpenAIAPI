@@ -6,7 +6,7 @@ import json, os, shlex, time, uuid, webbrowser, base64, re, secrets, asyncio, ra
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 from curl_cffi import requests as cffi_requests
 
@@ -28,9 +28,46 @@ BASE_DIR = Path(__file__).parent
 ACCOUNTS_FILE = BASE_DIR / "accounts.json"
 SETTINGS_FILE = BASE_DIR / "settings.json"
 STATS_FILE = BASE_DIR / "stats.json"
+AUTH_FILE = BASE_DIR / "auth.json"
 # 兼容旧版单账号配置
 token_json = BASE_DIR / "token.json"
 PROXY_PORT = int(os.getenv("PROXY_PORT", "8000"))
+
+# ── Web 认证 ─────────────────────────────────────────────
+_auth_sessions: dict = {}
+_auth_lock = threading.Lock()
+
+
+def _load_auth() -> dict:
+    defaults = {"username": "admin", "password": "admin"}
+    if AUTH_FILE.exists():
+        try:
+            data = json.loads(AUTH_FILE.read_text("utf-8"))
+            defaults.update(data)
+        except Exception:
+            pass
+    return defaults
+
+
+def _save_auth(data: dict):
+    AUTH_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), "utf-8")
+
+
+def _check_session(token: str) -> bool:
+    with _auth_lock:
+        return token in _auth_sessions
+
+
+def _create_session() -> str:
+    token = secrets.token_hex(32)
+    with _auth_lock:
+        _auth_sessions[token] = time.time()
+    return token
+
+
+def _clear_session(token: str):
+    with _auth_lock:
+        _auth_sessions.pop(token, None)
 
 # ── 全局日志队列（线程安全）───────────────────────────
 _log_queue: queue.Queue = queue.Queue(maxsize=500)
@@ -326,6 +363,20 @@ hr{border:none;border-top:1px solid #334155;margin:16px 0}
 <div class="c">
 <h1>DeepSeek Proxy <span style="font-size:13px;color:#64748b;font-weight:400">管理后台</span></h1>
 
+<div id="loginBox" style="display:none">
+  <div class="card" style="max-width:320px;margin:0 auto">
+    <div class="card-title" style="text-align:center;font-size:16px">🔐 登录管理后台</div>
+    <div style="margin-top:12px">
+      <input type="text" id="loginUser" placeholder="用户名" style="margin-bottom:8px">
+      <input type="password" id="loginPass" placeholder="密码" style="margin-bottom:12px">
+      <button class="btn bp" onclick="doWebLogin()" id="loginBtn" style="width:100%">登录</button>
+      <div id="loginError" style="color:#f87171;font-size:12px;margin-top:8px;text-align:center;display:none"></div>
+    </div>
+  </div>
+</div>
+
+<div id="mainContent" style="display:none">
+
 <div id="statusBar" class="status no"><span class="dot dy"></span><span id="statusText">等待配置</span></div>
 
 <div class="tab-bar">
@@ -408,6 +459,13 @@ hr{border:none;border-top:1px solid #334155;margin:16px 0}
     <div style="font-size:12px;color:#64748b;margin-bottom:8px">第三方客户端调用时需要填的 API Key（留空则不校验）</div>
     <input type="text" id="apiKey" placeholder="sk-default">
   </div>
+  <div class="card">
+    <div class="card-title">修改管理密码</div>
+    <input type="text" id="newUsername" placeholder="新用户名（不填则不修改）" style="margin-bottom:8px">
+    <input type="password" id="oldPassword" placeholder="旧密码" style="margin-bottom:8px">
+    <input type="password" id="newPassword" placeholder="新密码">
+    <button class="btn bp" onclick="changePassword()" style="width:100%;margin-top:8px">修改密码</button>
+  </div>
   <button class="btn bp" onclick="saveSettings()" style="width:100%">保存设置</button>
 </div>
 
@@ -483,6 +541,8 @@ hr{border:none;border-top:1px solid #334155;margin:16px 0}
     <span style="margin-left:8px;font-size:11px;color:#64748b">|</span>
     <button class="btn" style="background:none;color:#7dd3fc;font-size:11px;padding:0;margin-left:8px" onclick="clearStats()">清空统计</button>
   </div>
+</div>
+
 </div>
 
 </div>
@@ -647,6 +707,16 @@ async function saveSettings(){
     const d=await r.json();toast(d.ok?'已保存':'保存失败',d.ok?0:1);
   }catch(e){toast(e.message,1)}
 }
+async function changePassword(){
+  const oldPw=$('oldPassword').value,newPw=$('newPassword').value,newUser=$('newUsername').value.trim();
+  if(!oldPw||!newPw){toast('请输入旧密码和新密码',1);return}
+  try{
+    const r=await fetch('/api/auth/change-password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({old_password:oldPw,new_password:newPw,new_username:newUser})});
+    const d=await r.json();
+    if(d.ok){toast('密码已修改');$('oldPassword').value='';$('newPassword').value='';$('newUsername').value='';}
+    else{toast(d.error,1)}
+  }catch(e){toast(e.message,1)}
+}
 
 // 对话
 let _chatHistory=[];
@@ -733,12 +803,39 @@ async function clearStats(){
 }
 let _statsIv=null;
 
-// 初始化
-(async function init(){
+// Web 认证
+async function doWebLogin(){
+  const u=$('loginUser').value.trim(),p=$('loginPass').value;
+  if(!u||!p){$('loginError').style.display='block';$('loginError').textContent='请输入用户名和密码';return;}
+  $('loginBtn').disabled=true;$('loginBtn').textContent='登录中...';
+  try{
+    const r=await fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u,password:p})});
+    const d=await r.json();
+    if(d.ok){$('loginBox').style.display='none';$('mainContent').style.display='block';initMain();}
+    else{$('loginError').style.display='block';$('loginError').textContent=d.error;}
+  }catch(e){$('loginError').style.display='block';$('loginError').textContent=e.message;}
+  $('loginBtn').disabled=false;$('loginBtn').textContent='登录';
+}
+async function doWebLogout(){
+  await fetch('/api/auth/logout',{method:'POST'});
+  $('mainContent').style.display='none';$('loginBox').style.display='block';
+}
+$('loginPass').addEventListener('keydown',e=>{if(e.key==='Enter')doWebLogin();});
+
+async function initMain(){
   await loadModels();
   loadAccounts();
   loadSettings();
   refreshStats();
+}
+
+// 检查登录状态
+(async function init(){
+  try{
+    const r=await fetch('/api/auth/status');const d=await r.json();
+    if(d.ok){$('mainContent').style.display='block';initMain();}
+    else{$('loginBox').style.display='block';}
+  }catch(e){$('loginBox').style.display='block';}
 })();
 </script>
 </body>
@@ -965,6 +1062,55 @@ async def deepseek_login(data: dict):
     except Exception as e:
         log_error(f"登录异常: {e}")
         return {"ok": False, "error": str(e)}
+
+
+# ── Web 认证 API ─────────────────────────────────────────
+@app.post("/api/auth/login")
+async def auth_login(data: dict, response: Response):
+    username = data.get("username", "")
+    password = data.get("password", "")
+    auth = _load_auth()
+    if username == auth["username"] and password == auth["password"]:
+        token = _create_session()
+        response.set_cookie(key="ds_auth", value=token, httponly=True, max_age=86400)
+        log_info(f"Web 登录成功: {username}")
+        return {"ok": True}
+    return {"ok": False, "error": "用户名或密码错误"}
+
+
+@app.post("/api/auth/logout")
+async def auth_logout(request: Request, response: Response):
+    token = request.cookies.get("ds_auth", "")
+    _clear_session(token)
+    response.delete_cookie("ds_auth")
+    return {"ok": True}
+
+
+@app.get("/api/auth/status")
+async def auth_status(request: Request):
+    token = request.cookies.get("ds_auth", "")
+    return {"ok": _check_session(token)}
+
+
+@app.post("/api/auth/change-password")
+async def auth_change_password(request: Request, data: dict):
+    token = request.cookies.get("ds_auth", "")
+    if not _check_session(token):
+        raise HTTPException(401, "请先登录")
+    auth = _load_auth()
+    old_pw = data.get("old_password", "")
+    new_pw = data.get("new_password", "").strip()
+    if not new_pw:
+        return {"ok": False, "error": "新密码不能为空"}
+    if old_pw != auth["password"]:
+        return {"ok": False, "error": "旧密码错误"}
+    new_username = data.get("new_username", "").strip()
+    if new_username:
+        auth["username"] = new_username
+    auth["password"] = new_pw
+    _save_auth(auth)
+    log_info("Web 密码已修改")
+    return {"ok": True}
 
 
 # ── 设置 API ─────────────────────────────────────────────

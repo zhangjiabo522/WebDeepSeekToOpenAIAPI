@@ -50,6 +50,20 @@ if [ -z "$PORT" ]; then
     fi
 fi
 
+# ── 设置 Web 管理后台账号密码 ──
+if [ -z "${WEB_USER:-}" ] && [ -z "${WEB_PASS:-}" ]; then
+    echo ""
+    echo -e "设置管理后台账号密码（默认 admin/admin）："
+    read -p "用户名 [admin]: " WEB_USER
+    WEB_USER="${WEB_USER:-admin}"
+    read -p "密码   [admin]: " WEB_PASS
+    WEB_PASS="${WEB_PASS:-admin}"
+    info "后台账号: $WEB_USER"
+else
+    WEB_USER="${WEB_USER:-admin}"
+    WEB_PASS="${WEB_PASS:-admin}"
+fi
+
 # ── 1. 系统检测 ──
 if ! command -v apt &>/dev/null && ! command -v yum &>/dev/null && ! command -v dnf &>/dev/null; then
     warn "非标准 Linux 发行版，将跳过包管理器，请确保已安装 Python3 >= 3.10 和 git"
@@ -105,6 +119,10 @@ else
 fi
 
 cd "$INSTALL_DIR"
+
+# ── 写入 auth.json ──
+python3 -c "import json; json.dump({'username':'$WEB_USER','password':'$WEB_PASS'}, open('auth.json','w'), indent=2)"
+info "auth.json 已生成"
 
 # ── 5. 安装 Python 依赖 ──
 info "安装 Python 依赖..."
