@@ -312,11 +312,15 @@ print(response.choices[0].message.tool_calls)
 
 ## 常见问题
 
+### Update to the latest version to use Expert/Vision
+
+`x-client-version` 需要与 DeepSeek 网页端保持一致（当前 `2.0.2`），代理启动时 `build_request_headers` 已强制设置。
+
 ### 管理后台无法登录
 
 默认账号密码为 `admin` / `admin`。如果忘记密码，删除 `auth.json` 文件后重启即可重置为默认值。
 
-代理会自动尝试重新登录。如果失败，到管理页面重新登录该账号。
+### Token 过期 / 401 错误
 
 ### 401 Unauthorized (API Key)
 
