@@ -1217,7 +1217,7 @@ async def frontend_chat(request: Request):
     # 处理图片/文件上传
     ref_file_ids = []
     try:
-        ref_file_ids, messages = process_image_content(cfg, messages)
+        ref_file_ids, cfg = process_vision_images(cfg, messages)
     except Exception:
         pass
 
@@ -1499,7 +1499,7 @@ async def upload_file(request: Request):
     if not cfg:
         raise HTTPException(503, "没有可用账号")
 
-    fid = upload_file_to_deepseek(cfg, file_name, file_data, file_field.content_type or "application/octet-stream")
+    fid = upload_file_to_deepseek(file_data, file_name, file_field.content_type or "application/octet-stream")
     if not fid:
         raise HTTPException(502, "文件上传失败")
 
@@ -1591,92 +1591,180 @@ def build_request_headers(cfg: dict, session_id: str) -> dict:
     return req_headers
 
 
-# ── 文件上传 ─────────────────────────────────────────────
-def upload_file_to_deepseek(cfg: dict, file_name: str, file_data: bytes, content_type: str = "application/octet-stream") -> Optional[str]:
-    """上传文件到 DeepSeek，返回 file_id。"""
+# ── 文件上传（使用标准 requests，非 curl_cffi）─────────────
+import requests as _requests
+
+
+def upload_file_to_deepseek(file_data: bytes, filename: str, content_type: str = "image/png") -> Optional[str]:
+    """上传文件到 DeepSeek（使用标准 requests，获取 Pow 认证）。"""
+    cfg = _pick_account()
+    if not cfg:
+        return None
     session_id = cfg["session_id"]
-    headers = build_request_headers(cfg, session_id)
-    # 对于上传请求需要 multipart
-    upload_headers = {k: v for k, v in headers.items() if k.lower() not in ("content-type",)}
+    pow_response = get_pow_response(target_path="/api/v0/file/upload_file")
+    req_headers = build_request_headers(cfg, session_id)
+    if pow_response:
+        req_headers["x-ds-pow-response"] = pow_response
+    req_headers.pop("content-type", None)
     try:
-        import io
-        multipart_data = [
-            {"field": "file", "filename": file_name, "content": file_data, "type": content_type},
-        ]
-        resp = cffi_requests.post(
-            "https://chat.deepseek.com/api/v0/file/upload",
-            multipart=multipart_data,
-            headers=upload_headers,
-            impersonate="chrome120",
+        resp = _requests.post(
+            "https://chat.deepseek.com/api/v0/file/upload_file",
+            headers=req_headers,
+            files={"file": (filename, file_data, content_type)},
             timeout=60,
         )
         if resp.status_code == 200:
             data = resp.json()
-            file_id = (data.get("data") or {}).get("biz_data") or {}
-            fid = file_id.get("id") or file_id.get("file_id") or ""
-            if fid:
-                log_info(f"文件上传成功: {file_name} -> {fid}")
-                return fid
+            file_id = (data.get("data", {}).get("biz_data", {}).get("id", "")
+                       or data.get("data", {}).get("id", ""))
+            if file_id:
+                log_info(f"文件上传成功: {filename} -> {file_id}")
+                return file_id
         log_warn(f"文件上传失败: {resp.status_code} {resp.text[:200]}")
     except Exception as e:
         log_error(f"文件上传异常: {e}")
     return None
 
 
-def process_image_content(cfg: dict, messages: list) -> list:
-    """处理消息中的 image_url 内容：下载图片 -> 上传到 DeepSeek -> 返回 file_ids 和清理后的消息。"""
-    import base64 as b64
-    file_ids = []
-    new_messages = []
+def fork_file_for_vision(cfg: dict, file_id: str) -> Optional[str]:
+    """将已上传文件 fork 到 vision 模型类型。"""
+    try:
+        headers = build_request_headers(cfg, cfg["session_id"])
+        resp = _requests.post(
+            "https://chat.deepseek.com/api/v0/file/fork_file_task",
+            headers=headers,
+            json={"file_id": file_id, "to_model_type": "vision"},
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            biz = data.get("data", {}).get("biz_data", {})
+            forked_id = biz.get("id") or biz.get("file_id", "")
+            if forked_id and forked_id != file_id:
+                log_info(f"文件 fork 成功: {file_id} -> {forked_id}")
+                return forked_id
+    except Exception as e:
+        log_error(f"文件 fork 异常: {e}")
+    return None
+
+
+def wait_for_file_parsing(cfg: dict, file_ids: list, timeout: int = 30) -> list:
+    """等待 DeepSeek 完成文件解析。"""
+    if not file_ids:
+        return []
+    start = time.time()
+    while time.time() - start < timeout:
+        try:
+            headers = build_request_headers(cfg, cfg["session_id"])
+            resp = _requests.get(
+                "https://chat.deepseek.com/api/v0/file/fetch_files",
+                headers=headers,
+                params={"file_ids": file_ids},
+                timeout=15,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                biz = data.get("data", {}).get("biz_data", {})
+                files = biz.get("files", [])
+                all_done = True
+                parsed = []
+                for f in files:
+                    fid = f.get("id") or f.get("file_id", "")
+                    status = str(f.get("status", "")).upper()
+                    if status in ("SUCCESS", "COMPLETED"):
+                        parsed.append(fid)
+                    elif status in ("PENDING", "PARSING", "UPLOADING", "QUEUED"):
+                        all_done = False
+                if all_done:
+                    return parsed
+                if parsed and time.time() - start > 5:
+                    return parsed
+        except Exception:
+            pass
+        time.sleep(1)
+    return []
+
+
+def extract_images_from_messages(messages: list) -> list:
+    """从 OpenAI 格式消息中提取图片。"""
+    images = []
     for msg in messages:
         content = msg.get("content", "")
-        role = msg.get("role", "")
         if isinstance(content, list):
-            # 多模态内容
-            text_parts = []
             for part in content:
                 if isinstance(part, dict):
-                    if part.get("type") == "text":
-                        text_parts.append(part.get("text", ""))
-                    elif part.get("type") == "image_url":
-                        img_url = (part.get("image_url") or {}).get("url", "")
-                        if img_url:
-                            # 下载或解码图片
-                            img_data = None
-                            img_name = "image.png"
-                            if img_url.startswith("data:"):
-                                # base64 data URL
-                                try:
-                                    header, encoded = img_url.split(",", 1)
-                                    img_data = b64.b64decode(encoded)
-                                    if "jpeg" in header or "jpg" in header:
-                                        img_name = "image.jpg"
-                                    elif "webp" in header:
-                                        img_name = "image.webp"
-                                except Exception:
-                                    pass
-                            elif img_url.startswith("http"):
-                                try:
-                                    r = cffi_requests.get(img_url, impersonate="chrome120", timeout=30)
-                                    if r.status_code == 200:
-                                        img_data = r.content
-                                        ct = r.headers.get("content-type", "")
-                                        if "png" in ct:
-                                            img_name = "image.png"
-                                        elif "webp" in ct:
-                                            img_name = "image.webp"
-                                        else:
-                                            img_name = "image.jpg"
-                                except Exception:
-                                    pass
-                            if img_data:
-                                fid = upload_file_to_deepseek(cfg, img_name, img_data)
-                                if fid:
-                                    file_ids.append(fid)
-            new_content = "\n".join(text_parts) if text_parts else ""
-            msg = {**msg, "content": new_content}
-        new_messages.append(msg)
-    return file_ids, new_messages
+                    if part.get("type") == "image_url":
+                        url = (part.get("image_url") or {}).get("url", "")
+                        img = _parse_image_url(url)
+                        if img:
+                            images.append(img)
+    return images
+
+
+def _parse_image_url(url_or_data: str) -> Optional[dict]:
+    """解析图片 URL 或 base64 数据，返回 {data, content_type, filename}。"""
+    if not url_or_data:
+        return None
+    s = url_or_data.strip()
+    if s.startswith("data:"):
+        header, encoded = s.split(",", 1)
+        ct = "image/png"
+        for part in header.split(";")[0].split(":")[1:]:
+            ct = part
+        try:
+            data = base64.b64decode(encoded)
+            ext = ct.split("/")[-1] if "/" in ct else "png"
+            return {"data": data, "content_type": ct, "filename": f"image.{ext}"}
+        except Exception:
+            return None
+    if s.startswith("http://") or s.startswith("https://"):
+        try:
+            resp = cffi_requests.get(s, timeout=30, impersonate="chrome120")
+            if resp.status_code == 200:
+                ct = resp.headers.get("content-type", "image/png")
+                ext = ct.split("/")[-1] if "/" in ct else "png"
+                return {"data": resp.content, "content_type": ct, "filename": f"image.{ext}"}
+        except Exception:
+            pass
+    return None
+
+
+def process_vision_images(cfg: dict, messages: list) -> (list, dict):
+    """处理视觉消息：提取图片 → 上传 → fork → 等待解析 → 返回 ref_file_ids 和新 cfg。"""
+    images = extract_images_from_messages(messages)
+    if not images:
+        return [], cfg
+
+    ref_file_ids = []
+    log_info(f"视觉处理: 发现 {len(images)} 张图片")
+    for img in images:
+        orig_fid = upload_file_to_deepseek(img["data"], img["filename"], img["content_type"])
+        if orig_fid:
+            forked_fid = fork_file_for_vision(cfg, orig_fid)
+            if forked_fid:
+                ref_file_ids.append(forked_fid)
+
+    if ref_file_ids:
+        # 等待解析完成
+        ref_file_ids = wait_for_file_parsing(cfg, ref_file_ids)
+        # 为视觉请求创建新 session
+        token = cfg.get("token", "")
+        if token:
+            try:
+                auth_h = {**cfg.get("headers", {}), "authorization": f"Bearer {token}"}
+                sess_resp = cffi_requests.post(
+                    "https://chat.deepseek.com/api/v0/chat_session/create",
+                    json={}, headers=auth_h, impersonate="chrome120", timeout=15)
+                if sess_resp.status_code == 200:
+                    biz = sess_resp.json().get("data", {}).get("biz_data", {})
+                    new_sid = biz.get("chat_session", {}).get("id", "") or biz.get("id", "")
+                    if new_sid:
+                        cfg = dict(cfg)
+                        cfg["session_id"] = new_sid
+                        log_info(f"视觉新 session: {new_sid}")
+            except Exception as e:
+                log_error(f"视觉 session 创建失败: {e}")
+    return ref_file_ids, cfg
 
 
 def get_pow_response(target_path: str = "/api/v0/chat/completion") -> str | None:
@@ -1754,7 +1842,7 @@ async def chat(request: Request):
     # 处理图片/文件上传
     ref_file_ids = []
     try:
-        ref_file_ids, messages = process_image_content(cfg, messages)
+        ref_file_ids, cfg = process_vision_images(cfg, messages)
     except Exception:
         pass
 
@@ -1835,6 +1923,13 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
         "thinking_enabled": thinking_enabled,
         "search_enabled": search_enabled,
     }
+    # 设置 model_type
+    if ref_file_ids:
+        req_body["model_type"] = "vision"
+    elif "expert" in model:
+        req_body["model_type"] = "expert"
+    else:
+        req_body["model_type"] = "default"
 
     chat_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     created = int(time.time())
