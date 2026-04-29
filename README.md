@@ -1,6 +1,12 @@
 # WebDeepSeekToOpenAIAPI
 
-将 DeepSeek 网页端免费对话反代为 OpenAI 兼容接口，支持工具调用、多账号管理、前端对话和实时日志。
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](https://www.python.org/)
+[![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
+[![FastAPI](https://img.shields.io/badge/FastAPI-teal)](https://fastapi.tiangolo.com/)
+[![Vision](https://img.shields.io/badge/多模态-图片识别-orange)](#)
+[![Thanks](https://img.shields.io/badge/特别感谢-Fly143-red)](https://github.com/Fly143)
+
+将 DeepSeek 网页端免费对话反代为 OpenAI 兼容接口，支持工具调用、多账号管理、多模态图片识别。
 
 ## 一键部署
 
