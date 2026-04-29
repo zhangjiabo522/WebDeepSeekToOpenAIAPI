@@ -1947,7 +1947,7 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
     created = int(time.time())
 
     def _parse_sse(resp):
-        phase = "content"
+        phase = "thinking" if thinking_enabled else "content"
         _first_content = True
         fragment_type = None  # None=old format, "THINK"/"RESPONSE"=fragments format
         _line_buf = b""
