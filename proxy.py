@@ -1214,17 +1214,24 @@ async def frontend_chat(request: Request):
     if not cfg:
         raise HTTPException(503, "没有可用账号")
 
+    # 处理图片/文件上传
+    ref_file_ids = []
+    try:
+        ref_file_ids, messages = process_image_content(cfg, messages)
+    except Exception:
+        pass
+
     # 模型解析
     model_info = get_models().get(model, get_models().get("deepseek-chat"))
     if not model_info:
-        model_info = (False, False, 1048576, 393216)
-    thinking_enabled, search_enabled, _, _ = model_info
+        model_info = (False, False, False, 1048576, 393216)
+    thinking_enabled, search_enabled, _, _, _ = model_info
 
     prompt = convert_messages_for_deepseek(messages)
     input_tokens = max(1, len(prompt))
     t0 = time.time()
     result = _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream,
-                    is_retry=False, has_tools=False, tools=None)
+                    is_retry=False, has_tools=False, tools=None, ref_file_ids=ref_file_ids)
     return _track_and_return(result, t0, model, stream, input_tokens)
 
 
@@ -1238,7 +1245,7 @@ async def health():
 # ── 模型映射（动态从 DeepSeek 探测）─────────────────
 MODEL_CONFIG_URL = "https://chat.deepseek.com/api/v0/client/settings?scope=model"
 
-_models_cache = {}
+_models_cache = {}       # model_id → (thinking, search, vision, max_in, max_out)
 _models_cache_time = 0
 _MODELS_TTL = 3600
 
@@ -1274,37 +1281,48 @@ def _discover_models() -> dict:
         models = {}
         for mc in model_configs:
             mt = mc.get("model_type")
-            if not mt or not mc.get("enabled"):
+            if not mt:
                 continue
 
+            enabled = mc.get("enabled", False)
             ff = mc.get("file_feature") or {}
             max_in = ff.get("token_limit", 1048576)
             max_out = ff.get("token_limit_with_thinking", 393216)
             has_think = mc.get("think_feature") is not None
             has_search = mc.get("search_feature") is not None
+            has_vision = mc.get("image_feature") is not None or mc.get("vision_feature") is not None
+            has_file = mc.get("file_feature") is not None and ff.get("file_upload", False)
 
             speed = "v4-flash" if mt == "default" else "v4-pro"
             base = "chat" if mt == "default" else mt
 
             name = f"deepseek-{base}"
-            models[name] = (False, False, max_in, max_out)
+            models[name] = (False, False, has_vision, max_in, max_out)
 
             if has_think:
                 tname = f"deepseek-{base}-reasoner"
-                models[tname] = (True, False, max_in, max_out)
+                models[tname] = (True, False, has_vision, max_in, max_out)
 
             if has_search:
                 sname = f"deepseek-{base}-search"
-                models[sname] = (False, True, max_in, max_out)
+                models[sname] = (False, True, has_vision, max_in, max_out)
 
             if has_think and has_search:
                 cname = f"deepseek-{base}-reasoner-search"
-                models[cname] = (True, True, max_in, max_out)
+                models[cname] = (True, True, has_vision, max_in, max_out)
+
+            # 视觉专用模型（如果上游有的话）
+            if has_vision and mt not in ("default",):
+                vname = f"deepseek-{base}-vision"
+                models[vname] = (False, False, True, max_in, max_out)
+                if has_think:
+                    vtname = f"deepseek-{base}-vision-reasoner"
+                    models[vtname] = (True, False, True, max_in, max_out)
 
         if models:
             _models_cache = models
             _models_cache_time = time.time()
-            log_info(f"发现 {len(models)} 个模型")
+            log_info(f"发现 {len(models)} 个模型（含视觉:{sum(1 for v in models.values() if v[2])}）")
             return models
 
     except Exception as e:
@@ -1457,10 +1475,44 @@ def load_config_with_refresh() -> dict:
 
 
 # ── OpenAI 兼容 API ──────────────────────────────────────
+@app.post("/v1/files")
+async def upload_file(request: Request):
+    """上传文件到 DeepSeek（兼容 OpenAI Files API）。"""
+    if not _get_active_accounts():
+        raise HTTPException(503, f"请先登录账号 http://localhost:{PROXY_PORT}/admin")
+
+    content_type = request.headers.get("content-type", "")
+    if "multipart/form-data" not in content_type:
+        raise HTTPException(400, "需要 multipart/form-data")
+
+    form = await request.form()
+    file_field = form.get("file")
+    purpose = form.get("purpose", "assistants")
+
+    if not file_field or not hasattr(file_field, "filename"):
+        raise HTTPException(400, "缺少 file 字段")
+
+    file_name = file_field.filename or "file"
+    file_data = await file_field.read()
+
+    cfg = _pick_account()
+    if not cfg:
+        raise HTTPException(503, "没有可用账号")
+
+    fid = upload_file_to_deepseek(cfg, file_name, file_data, file_field.content_type or "application/octet-stream")
+    if not fid:
+        raise HTTPException(502, "文件上传失败")
+
+    return {
+        "id": fid, "object": "file", "bytes": len(file_data),
+        "created_at": int(time.time()), "filename": file_name, "purpose": purpose,
+    }
+
+
 @app.get("/v1/models")
 async def models():
     data = []
-    for mid, (think, search, mi, mo) in get_models().items():
+    for mid, (think, search, vision, mi, mo) in get_models().items():
         data.append({
             "id": mid, "object": "model", "created": 1704067200,
             "owned_by": "deepseek",
@@ -1476,7 +1528,7 @@ async def model_detail(model_id: str):
     info = get_models().get(model_id)
     if not info:
         raise HTTPException(404, f"模型 {model_id} 不存在")
-    think, search, mi, mo = info
+    think, search, vision, mi, mo = info
     return {
         "id": model_id, "object": "model", "created": 1704067200,
         "owned_by": "deepseek",
@@ -1491,7 +1543,7 @@ async def refresh_models():
     _models_cache_time = 0
     models = get_models()
     data = []
-    for mid, (think, search, mi, mo) in models.items():
+    for mid, (think, search, vision, mi, mo) in models.items():
         data.append({
             "id": mid, "object": "model", "created": 1704067200,
             "owned_by": "deepseek",
@@ -1537,6 +1589,91 @@ def build_request_headers(cfg: dict, session_id: str) -> dict:
     req_headers["origin"] = "https://chat.deepseek.com"
     req_headers["referer"] = f"https://chat.deepseek.com/a/chat/s/{session_id}"
     return req_headers
+
+
+# ── 文件上传 ─────────────────────────────────────────────
+def upload_file_to_deepseek(cfg: dict, file_name: str, file_data: bytes, content_type: str = "application/octet-stream") -> Optional[str]:
+    """上传文件到 DeepSeek，返回 file_id。"""
+    session_id = cfg["session_id"]
+    headers = build_request_headers(cfg, session_id)
+    # 对于上传请求需要 multipart
+    upload_headers = {k: v for k, v in headers.items() if k.lower() not in ("content-type",)}
+    try:
+        files = {"file": (file_name, file_data, content_type)}
+        resp = cffi_requests.post(
+            "https://chat.deepseek.com/api/v0/file/upload",
+            files=files,
+            headers=upload_headers,
+            impersonate="chrome120",
+            timeout=60,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            file_id = (data.get("data") or {}).get("biz_data") or {}
+            fid = file_id.get("id") or file_id.get("file_id") or ""
+            if fid:
+                log_info(f"文件上传成功: {file_name} -> {fid}")
+                return fid
+        log_warn(f"文件上传失败: {resp.status_code} {resp.text[:200]}")
+    except Exception as e:
+        log_error(f"文件上传异常: {e}")
+    return None
+
+
+def process_image_content(cfg: dict, messages: list) -> list:
+    """处理消息中的 image_url 内容：下载图片 -> 上传到 DeepSeek -> 返回 file_ids 和清理后的消息。"""
+    import base64 as b64
+    file_ids = []
+    new_messages = []
+    for msg in messages:
+        content = msg.get("content", "")
+        role = msg.get("role", "")
+        if isinstance(content, list):
+            # 多模态内容
+            text_parts = []
+            for part in content:
+                if isinstance(part, dict):
+                    if part.get("type") == "text":
+                        text_parts.append(part.get("text", ""))
+                    elif part.get("type") == "image_url":
+                        img_url = (part.get("image_url") or {}).get("url", "")
+                        if img_url:
+                            # 下载或解码图片
+                            img_data = None
+                            img_name = "image.png"
+                            if img_url.startswith("data:"):
+                                # base64 data URL
+                                try:
+                                    header, encoded = img_url.split(",", 1)
+                                    img_data = b64.b64decode(encoded)
+                                    if "jpeg" in header or "jpg" in header:
+                                        img_name = "image.jpg"
+                                    elif "webp" in header:
+                                        img_name = "image.webp"
+                                except Exception:
+                                    pass
+                            elif img_url.startswith("http"):
+                                try:
+                                    r = cffi_requests.get(img_url, impersonate="chrome120", timeout=30)
+                                    if r.status_code == 200:
+                                        img_data = r.content
+                                        ct = r.headers.get("content-type", "")
+                                        if "png" in ct:
+                                            img_name = "image.png"
+                                        elif "webp" in ct:
+                                            img_name = "image.webp"
+                                        else:
+                                            img_name = "image.jpg"
+                                except Exception:
+                                    pass
+                            if img_data:
+                                fid = upload_file_to_deepseek(cfg, img_name, img_data)
+                                if fid:
+                                    file_ids.append(fid)
+            new_content = "\n".join(text_parts) if text_parts else ""
+            msg = {**msg, "content": new_content}
+        new_messages.append(msg)
+    return file_ids, new_messages
 
 
 def get_pow_response(target_path: str = "/api/v0/chat/completion") -> str | None:
@@ -1611,10 +1748,17 @@ async def chat(request: Request):
     if not cfg:
         raise HTTPException(503, "没有可用账号")
 
+    # 处理图片/文件上传
+    ref_file_ids = []
+    try:
+        ref_file_ids, messages = process_image_content(cfg, messages)
+    except Exception:
+        pass
+
     model_info = get_models().get(model, get_models().get("deepseek-chat"))
     if not model_info:
-        model_info = (False, False, 1048576, 393216)
-    thinking_enabled, search_enabled, _, _ = model_info
+        model_info = (False, False, False, 1048576, 393216)
+    thinking_enabled, search_enabled, _, _, _ = model_info
 
     prompt = convert_messages_for_deepseek(messages, tools)
     tool_prompt = build_tool_prompt(tools) if tools else ""
@@ -1628,7 +1772,7 @@ async def chat(request: Request):
     input_tokens = max(1, len(prompt))
     t0 = time.time()
     result = _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream,
-                    is_retry=False, has_tools=bool(tools), tools=tools)
+                    is_retry=False, has_tools=bool(tools), tools=tools, ref_file_ids=ref_file_ids)
     return _track_and_return(result, t0, model, stream, input_tokens)
 
 
@@ -1673,7 +1817,7 @@ def _track_and_return(result, t0, model, stream, input_tokens):
         return result
 
 
-def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_retry=False, has_tools=False, tools=None):
+def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_retry=False, has_tools=False, tools=None, ref_file_ids=None):
     session_id = cfg["session_id"]
     req_headers = build_request_headers(cfg, session_id)
     pow_response = get_pow_response()
@@ -1684,7 +1828,7 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
         "chat_session_id": session_id,
         "parent_message_id": None,
         "prompt": prompt,
-        "ref_file_ids": [],
+        "ref_file_ids": ref_file_ids or [],
         "thinking_enabled": thinking_enabled,
         "search_enabled": search_enabled,
     }
