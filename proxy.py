@@ -1970,13 +1970,13 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
         def _clean_first(v, is_think=False):
             nonlocal _first_content, _first_think
             if is_think:
-                if _first_think and v and v[0] in (',', '，', '\uff01', '!', ':', '：', '\n', ' '):
-                    v = v[1:]
                 _first_think = False
-                return v
-            if _first_content and v and v[0] in ('\uff01', '!', ',', '，', ':', '：', '\n', ' '):
-                v = v[1:]
-            _first_content = False
+                return v  # thinking 内容不过滤，保留完整性
+            if _first_content:
+                # 仅过滤 DeepSeek 特有的前导 ！和首空格
+                while v and v[0] in ('\uff01', ' '):
+                    v = v[1:]
+                _first_content = False
             return v
 
         for line in _read_lines():
@@ -2213,13 +2213,11 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
             log_error(f"nonstream error: {e}")
             raise HTTPException(502, detail={"error": {"message": str(e), "type": "server_error"}})
 
-        # 过滤前导特殊字符
-        for ch in ('\uff01', '!', ',', '，', ':', '：', '\n', ' '):
+        # 过滤 DeepSeek 特有前导 ！
+        for ch in ('\uff01',):
             while full_content and full_content[0] == ch:
                 full_content = full_content[1:]
-        for ch in (',', '，', '!', '\uff01', ':', '：', '\n', ' '):
-            while full_thinking and full_thinking[0] == ch:
-                full_thinking = full_thinking[1:]
+        full_content = full_content.lstrip()
 
         finish_reason = "stop"
         tc_result = None
