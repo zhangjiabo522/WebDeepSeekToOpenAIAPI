@@ -1936,13 +1936,23 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
 
     def _parse_sse(resp):
         phase = "content"
-        _first_content = True  # 标记首个 content 以过滤前导 !
-        for line in resp.iter_lines():
-            if not line:
-                continue
-            if isinstance(line, bytes):
-                line = line.decode("utf-8", errors="ignore")
-            line = line.strip()
+        _first_content = True
+        fragment_type = None  # None=old format, "THINK"/"RESPONSE"=fragments format
+        _line_buf = b""
+
+        def _read_lines():
+            nonlocal _line_buf
+            for chunk in resp.iter_content(chunk_size=4096):
+                if not chunk:
+                    continue
+                _line_buf += chunk
+                while b"\n" in _line_buf:
+                    raw, _line_buf = _line_buf.split(b"\n", 1)
+                    yield raw.decode("utf-8", errors="ignore").strip()
+            if _line_buf.strip():
+                yield _line_buf.decode("utf-8", errors="ignore").strip()
+
+        for line in _read_lines():
             if not line:
                 continue
 
@@ -1970,6 +1980,8 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
                     continue
 
                 val = obj.get("v")
+
+                # Toast/metadata (v is dict)
                 if isinstance(val, dict):
                     t_type = val.get("type", "")
                     t_content = val.get("content", "")
@@ -1977,22 +1989,42 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
                     if t_type == "error" and fr:
                         yield ("error", {"message": t_content, "code": fr})
                         return
+                    # Extract fragment type from response metadata
+                    resp_data = val.get("response", {})
+                    if isinstance(resp_data, dict):
+                        frags = resp_data.get("fragments", [])
+                        if frags and isinstance(frags, list):
+                            last = frags[-1]
+                            if isinstance(last, dict) and last.get("type"):
+                                fragment_type = last["type"]
                     continue
 
                 path = obj.get("p", "")
                 v = obj.get("v", "")
+                if not isinstance(v, str) or not v:
+                    continue
 
-                if path == "response/content" and obj.get("o") == "APPEND":
-                    phase = "content"
-                    if isinstance(v, str) and v:
+                # ── Fragments format (vision models) ──
+                if path and "fragments" in path:
+                    if fragment_type == "THINK" and thinking_enabled:
+                        yield ("thinking", v)
+                    elif fragment_type == "RESPONSE" or fragment_type is None:
                         if _first_content and v and v[0] == '\uff01':
                             v = v[1:]
                         _first_content = False
                         yield ("content", v)
+                    continue
+
+                # ── Old format ──
+                if path == "response/content" and obj.get("o") == "APPEND":
+                    phase = "content"
+                    if _first_content and v and v[0] == '\uff01':
+                        v = v[1:]
+                    _first_content = False
+                    yield ("content", v)
                 elif path == "response/thinking_content" and thinking_enabled:
                     phase = "thinking"
-                    if isinstance(v, str) and v:
-                        yield ("thinking", v)
+                    yield ("thinking", v)
                 elif path:
                     continue
                 elif isinstance(v, str) and v:
