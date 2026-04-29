@@ -1599,10 +1599,10 @@ def upload_file_to_deepseek(cfg: dict, file_name: str, file_data: bytes, content
     # 对于上传请求需要 multipart
     upload_headers = {k: v for k, v in headers.items() if k.lower() not in ("content-type",)}
     try:
-        files = {"file": (file_name, file_data, content_type)}
+        multipart_data = {"file": (file_name, file_data, content_type)}
         resp = cffi_requests.post(
             "https://chat.deepseek.com/api/v0/file/upload",
-            files=files,
+            multipart=multipart_data,
             headers=upload_headers,
             impersonate="chrome120",
             timeout=60,
@@ -1837,7 +1837,8 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
     created = int(time.time())
 
     def _parse_sse(resp):
-        phase = "thinking"
+        phase = "content"
+        _first_content = True  # 标记首个 content 以过滤前导 !
         for line in resp.iter_lines():
             if not line:
                 continue
@@ -1886,6 +1887,9 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
                 if path == "response/content" and obj.get("o") == "APPEND":
                     phase = "content"
                     if isinstance(v, str) and v:
+                        if _first_content and v and v[0] == '\uff01':
+                            v = v[1:]
+                        _first_content = False
                         yield ("content", v)
                 elif path == "response/thinking_content" and thinking_enabled:
                     phase = "thinking"
@@ -1894,6 +1898,9 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
                 elif path:
                     continue
                 elif isinstance(v, str) and v:
+                    if _first_content and v and v[0] == '\uff01':
+                        v = v[1:]
+                    _first_content = False
                     if phase == "thinking" and thinking_enabled:
                         yield ("thinking", v)
                     else:
@@ -2033,6 +2040,10 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
         except Exception as e:
             log_error(f"nonstream error: {e}")
             raise HTTPException(502, detail={"error": {"message": str(e), "type": "server_error"}})
+
+        # 过滤前导 !
+        if full_content and full_content[0] == '\uff01':
+            full_content = full_content[1:]
 
         finish_reason = "stop"
         tc_result = None
