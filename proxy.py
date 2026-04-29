@@ -1950,6 +1950,7 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
         # 初始：根据 thinking_enabled 决定默认模式，但内容切换后坚持内容模式
         phase = "thinking" if thinking_enabled else "content"
         _first_content = True
+        _first_think = True
         fragment_type = None
         _line_buf = b""
         _content_seen = not thinking_enabled  # 非 think 模型直接视为内容模式已激活
@@ -1965,6 +1966,18 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
                     yield raw.decode("utf-8", errors="ignore").strip()
             if _line_buf.strip():
                 yield _line_buf.decode("utf-8", errors="ignore").strip()
+
+        def _clean_first(v, is_think=False):
+            nonlocal _first_content, _first_think
+            if is_think:
+                if _first_think and v and v[0] in (',', '，', '\uff01', '!', ':', '：', '\n', ' '):
+                    v = v[1:]
+                _first_think = False
+                return v
+            if _first_content and v and v[0] in ('\uff01', '!', ',', '，', ':', '：', '\n', ' '):
+                v = v[1:]
+            _first_content = False
+            return v
 
         for line in _read_lines():
             if not line:
@@ -2028,16 +2041,15 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
 
                 # ── Fragments format (vision/reasoner models) ──
                 if path and "fragments" in path:
-                    # 等待 fragment_type 元数据，缓冲前几个 chunk
                     if fragment_type is None:
-                        # 还没收到元数据 → 如果开启 thinking 则暂当 thinking 处理
                         if thinking_enabled:
-                            yield ("thinking", v)
+                            yield ("thinking", _clean_first(v, True))
                         else:
-                            if _first_content and v and v[0] == '\uff01':
-                                v = v[1:]
-                            _first_content = False
-                            yield ("content", v)
+                            yield ("content", _clean_first(v))
+                    elif fragment_type == "THINK" and thinking_enabled:
+                        yield ("thinking", _clean_first(v, True))
+                    elif fragment_type == "RESPONSE":
+                        yield ("content", _clean_first(v))
                     elif fragment_type == "THINK" and thinking_enabled:
                         yield ("thinking", v)
                     elif fragment_type == "RESPONSE":
@@ -2051,25 +2063,19 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
                 if path == "response/content" and obj.get("o") == "APPEND":
                     phase = "content"
                     _content_seen = True
-                    if _first_content and v and v[0] == '\uff01':
-                        v = v[1:]
-                    _first_content = False
-                    yield ("content", v)
+                    yield ("content", _clean_first(v))
                 elif path == "response/thinking_content" and thinking_enabled:
                     phase = "thinking"
-                    yield ("thinking", v)
+                    yield ("thinking", _clean_first(v, True))
                 elif path:
                     continue
                 elif isinstance(v, str) and v:
-                    if _first_content and v and v[0] == '\uff01':
-                        v = v[1:]
-                    _first_content = False
                     if _content_seen:
-                        yield ("content", v)
+                        yield ("content", _clean_first(v))
                     elif phase == "thinking" and thinking_enabled:
-                        yield ("thinking", v)
+                        yield ("thinking", _clean_first(v, True))
                     else:
-                        yield ("content", v)
+                        yield ("content", _clean_first(v))
             except json.JSONDecodeError:
                 continue
 
@@ -2207,10 +2213,13 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
             log_error(f"nonstream error: {e}")
             raise HTTPException(502, detail={"error": {"message": str(e), "type": "server_error"}})
 
-        # 过滤前导 ! 和空格
-        if full_content and full_content[0] in ('\uff01', '!'):
-            full_content = full_content[1:]
-        full_content = full_content.lstrip()
+        # 过滤前导特殊字符
+        for ch in ('\uff01', '!', ',', '，', ':', '：', '\n', ' '):
+            while full_content and full_content[0] == ch:
+                full_content = full_content[1:]
+        for ch in (',', '，', '!', '\uff01', ':', '：', '\n', ' '):
+            while full_thinking and full_thinking[0] == ch:
+                full_thinking = full_thinking[1:]
 
         finish_reason = "stop"
         tc_result = None
