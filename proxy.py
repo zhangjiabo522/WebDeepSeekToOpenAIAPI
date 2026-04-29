@@ -2016,11 +2016,21 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
                 if not isinstance(v, str) or not v:
                     continue
 
-                # ── Fragments format (vision models) ──
+                # ── Fragments format (vision/reasoner models) ──
                 if path and "fragments" in path:
-                    if fragment_type == "THINK" and thinking_enabled:
+                    # 等待 fragment_type 元数据，缓冲前几个 chunk
+                    if fragment_type is None:
+                        # 还没收到元数据 → 如果开启 thinking 则暂当 thinking 处理
+                        if thinking_enabled:
+                            yield ("thinking", v)
+                        else:
+                            if _first_content and v and v[0] == '\uff01':
+                                v = v[1:]
+                            _first_content = False
+                            yield ("content", v)
+                    elif fragment_type == "THINK" and thinking_enabled:
                         yield ("thinking", v)
-                    elif fragment_type == "RESPONSE" or fragment_type is None:
+                    elif fragment_type == "RESPONSE":
                         if _first_content and v and v[0] == '\uff01':
                             v = v[1:]
                         _first_content = False
