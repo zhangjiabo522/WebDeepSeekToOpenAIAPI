@@ -1969,6 +1969,8 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
         for line in _read_lines():
             if not line:
                 continue
+            if line.startswith("data:") and thinking_enabled:
+                log_info(f"SSE: {line[:250]}")
 
             if line.startswith("event:"):
                 continue
