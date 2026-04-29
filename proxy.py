@@ -1960,6 +1960,9 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
         for line in _read_lines():
             if not line:
                 continue
+            # 视觉调试
+            if ref_file_ids and (line.startswith("data:") or not line.startswith("{")):
+                log_info(f"SSE_RAW: {line[:300]}")
 
             if line.startswith("event:"):
                 continue
