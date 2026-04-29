@@ -970,7 +970,7 @@ async def deepseek_login(data: dict):
         "origin": "https://chat.deepseek.com",
         "referer": "https://chat.deepseek.com/",
         "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/134.0.0.0 Safari/537.36",
-        "x-client-version": "1.0.0-always",
+        "x-client-version": "2.0.2",
         "x-client-platform": "web",
     }
 
@@ -1263,7 +1263,7 @@ def _discover_models() -> dict:
     headers = {
         "Authorization": f"Bearer {token}",
         "User-Agent": ua,
-        "X-Client-Version": "1.0.0-always",
+        "X-Client-Version": "2.0.2",
         "X-Client-Platform": "web",
     }
 
@@ -1379,7 +1379,7 @@ def relogin(cfg: dict) -> dict | None:
         "origin": "https://chat.deepseek.com",
         "referer": "https://chat.deepseek.com/",
         "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/134.0.0.0 Safari/537.36",
-        "x-client-version": "1.0.0-always",
+        "x-client-version": "2.0.2",
         "x-client-platform": "web",
     }
 
@@ -1960,9 +1960,6 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
         for line in _read_lines():
             if not line:
                 continue
-            # 视觉调试
-            if ref_file_ids and (line.startswith("data:") or not line.startswith("{")):
-                log_info(f"SSE_RAW: {line[:300]}")
 
             if line.startswith("event:"):
                 continue
