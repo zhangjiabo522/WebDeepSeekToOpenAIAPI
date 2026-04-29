@@ -1947,13 +1947,10 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
     created = int(time.time())
 
     def _parse_sse(resp):
-        # 初始：根据 thinking_enabled 决定默认模式，但内容切换后坚持内容模式
         phase = "thinking" if thinking_enabled else "content"
-        _first_content = True
-        _first_think = True
         fragment_type = None
         _line_buf = b""
-        _content_seen = not thinking_enabled  # 非 think 模型直接视为内容模式已激活
+        _content_seen = not thinking_enabled
 
         def _read_lines():
             nonlocal _line_buf
@@ -1966,18 +1963,6 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
                     yield raw.decode("utf-8", errors="ignore").strip()
             if _line_buf.strip():
                 yield _line_buf.decode("utf-8", errors="ignore").strip()
-
-        def _clean_first(v, is_think=False):
-            nonlocal _first_content, _first_think
-            if is_think:
-                _first_think = False
-                return v  # thinking 内容不过滤，保留完整性
-            if _first_content:
-                # 仅过滤 DeepSeek 特有的前导 ！和首空格
-                while v and v[0] in ('\uff01', ' '):
-                    v = v[1:]
-                _first_content = False
-            return v
 
         for line in _read_lines():
             if not line:
@@ -2043,13 +2028,13 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
                 if path and "fragments" in path:
                     if fragment_type is None:
                         if thinking_enabled:
-                            yield ("thinking", _clean_first(v, True))
+                            yield ("thinking", v)
                         else:
-                            yield ("content", _clean_first(v))
+                            yield ("content", v)
                     elif fragment_type == "THINK" and thinking_enabled:
-                        yield ("thinking", _clean_first(v, True))
+                        yield ("thinking", v)
                     elif fragment_type == "RESPONSE":
-                        yield ("content", _clean_first(v))
+                        yield ("content", v)
                     elif fragment_type == "THINK" and thinking_enabled:
                         yield ("thinking", v)
                     elif fragment_type == "RESPONSE":
@@ -2063,19 +2048,19 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
                 if path == "response/content" and obj.get("o") == "APPEND":
                     phase = "content"
                     _content_seen = True
-                    yield ("content", _clean_first(v))
+                    yield ("content", v)
                 elif path == "response/thinking_content" and thinking_enabled:
                     phase = "thinking"
-                    yield ("thinking", _clean_first(v, True))
+                    yield ("thinking", v)
                 elif path:
                     continue
                 elif isinstance(v, str) and v:
                     if _content_seen:
-                        yield ("content", _clean_first(v))
+                        yield ("content", v)
                     elif phase == "thinking" and thinking_enabled:
-                        yield ("thinking", _clean_first(v, True))
+                        yield ("thinking", v)
                     else:
-                        yield ("content", _clean_first(v))
+                        yield ("content", v)
             except json.JSONDecodeError:
                 continue
 
@@ -2213,10 +2198,9 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
             log_error(f"nonstream error: {e}")
             raise HTTPException(502, detail={"error": {"message": str(e), "type": "server_error"}})
 
-        # 过滤 DeepSeek 特有前导 ！
-        for ch in ('\uff01',):
-            while full_content and full_content[0] == ch:
-                full_content = full_content[1:]
+        # 仅过滤 DeepSeek 特有前导 ！
+        if full_content and full_content[0] == '\uff01':
+            full_content = full_content[1:]
         full_content = full_content.lstrip()
 
         finish_reason = "stop"
