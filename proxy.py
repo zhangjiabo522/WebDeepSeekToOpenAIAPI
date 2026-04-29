@@ -1947,10 +1947,12 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
     created = int(time.time())
 
     def _parse_sse(resp):
+        # 初始：根据 thinking_enabled 决定默认模式，但内容切换后坚持内容模式
         phase = "thinking" if thinking_enabled else "content"
         _first_content = True
-        fragment_type = None  # None=old format, "THINK"/"RESPONSE"=fragments format
+        fragment_type = None
         _line_buf = b""
+        _content_seen = not thinking_enabled  # 非 think 模型直接视为内容模式已激活
 
         def _read_lines():
             nonlocal _line_buf
@@ -2040,6 +2042,7 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
                 # ── Old format ──
                 if path == "response/content" and obj.get("o") == "APPEND":
                     phase = "content"
+                    _content_seen = True
                     if _first_content and v and v[0] == '\uff01':
                         v = v[1:]
                     _first_content = False
@@ -2053,7 +2056,9 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
                     if _first_content and v and v[0] == '\uff01':
                         v = v[1:]
                     _first_content = False
-                    if phase == "thinking" and thinking_enabled:
+                    if _content_seen:
+                        yield ("content", v)
+                    elif phase == "thinking" and thinking_enabled:
                         yield ("thinking", v)
                     else:
                         yield ("content", v)
