@@ -1969,8 +1969,6 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
         for line in _read_lines():
             if not line:
                 continue
-            if line.startswith("data:") and thinking_enabled:
-                log_info(f"SSE: {line[:250]}")
 
             if line.startswith("event:"):
                 continue
@@ -2005,7 +2003,6 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
                     if t_type == "error" and fr:
                         yield ("error", {"message": t_content, "code": fr})
                         return
-                    # Extract fragment type from response metadata
                     resp_data = val.get("response", {})
                     if isinstance(resp_data, dict):
                         frags = resp_data.get("fragments", [])
@@ -2013,6 +2010,15 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
                             last = frags[-1]
                             if isinstance(last, dict) and last.get("type"):
                                 fragment_type = last["type"]
+                    continue
+
+                # Fragments metadata (v is list containing fragment type info)
+                if isinstance(val, list) and obj.get("o") == "APPEND" and "fragments" in obj.get("p", ""):
+                    for item in val:
+                        if isinstance(item, dict) and item.get("type"):
+                            fragment_type = item["type"]
+                            if fragment_type == "RESPONSE":
+                                _content_seen = True
                     continue
 
                 path = obj.get("p", "")
