@@ -261,16 +261,18 @@ print(response.choices[0].message.tool_calls)
 
 模型列表通过 DeepSeek 服务端自动探测，常见模型：
 
-| 模型名 | 功能 | thinking | search |
-|--------|------|----------|--------|
-| `deepseek-chat` | 快速对话（v4-flash） | ✗ | ✗ |
-| `deepseek-chat-reasoner` | 深度思考（v4-flash） | ✓ | ✗ |
-| `deepseek-chat-search` | 联网搜索（v4-flash） | ✗ | ✓ |
-| `deepseek-chat-reasoner-search` | 思考+联网（v4-flash） | ✓ | ✓ |
-| `deepseek-expert` | 专家模式（v4-pro） | ✗ | ✗ |
-| `deepseek-expert-reasoner` | 专家深度思考（v4-pro） | ✓ | ✗ |
-| `deepseek-expert-search` | 专家联网搜索（v4-pro） | ✗ | ✓ |
-| `deepseek-expert-reasoner-search` | 专家思考+联网（v4-pro） | ✓ | ✓ |
+| 模型名 | 功能 | thinking | search | vision |
+|--------|------|----------|--------|--------|
+| `deepseek-chat` | 快速对话（v4-flash） | ✗ | ✗ | - |
+| `deepseek-chat-reasoner` | 深度思考（v4-flash） | ✓ | ✗ | - |
+| `deepseek-chat-search` | 联网搜索（v4-flash） | ✗ | ✓ | - |
+| `deepseek-chat-reasoner-search` | 思考+联网（v4-flash） | ✓ | ✓ | - |
+| `deepseek-expert` | 专家模式（v4-pro） | ✗ | ✗ | - |
+| `deepseek-expert-reasoner` | 专家深度思考（v4-pro） | ✓ | ✗ | - |
+| `deepseek-expert-search` | 专家联网搜索（v4-pro） | ✗ | ✓ | - |
+| `deepseek-expert-reasoner-search` | 专家思考+联网（v4-pro） | ✓ | ✓ | - |
+| `deepseek-expert-vision` | 专家多模态图片识别（v4-pro） | ✗ | ✗ | ✓ |
+| `deepseek-expert-vision-reasoner` | 专家多模态图片识别+思考（v4-pro） | ✓ | ✗ | ✓ |
 
 ## 项目结构
 
