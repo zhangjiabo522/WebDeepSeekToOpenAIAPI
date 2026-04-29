@@ -1951,24 +1951,8 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
         fragment_type = None
         _line_buf = b""
         _content_seen = not thinking_enabled
-        _first_out = {"content": True, "thinking": True}
-
-        def _filter(etype, val):
-            nonlocal _first_out
-            if _first_out.get(etype, False):
-                _first_out[etype] = False
-                # 首字符如果是孤立的 artifact 符号则丢弃整块
-                if val and all(c in '!！,，:：\uff01\n ' for c in val):
-                    return None
-            return (etype, val)
-
-        def _yield(etype, val):
-            nonlocal _first_out
-            if _first_out.get(etype, False) and val and len(val) == 1 and val in '!！,，:：':
-                _first_out[etype] = False
-                return  # 丢弃孤立的单字符 artifact
-            _first_out[etype] = False
-            yield (etype, val)
+        _skip_ct = True   # 跳过第一个纯 artifact 的 content chunk
+        _skip_th = True   # 跳过第一个纯 artifact 的 thinking chunk
 
         def _read_lines():
             nonlocal _line_buf
@@ -2044,18 +2028,19 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
 
                 # ── Fragments format (vision/reasoner models) ──
                 if path and "fragments" in path:
-                    out = None
                     if fragment_type is None:
                         if thinking_enabled:
-                            out = _filter("thinking", v)
+                            if not _skip_th or not (v and all(c in '!！,，﻿' for c in v)):
+                                _skip_th = False; yield ("thinking", v)
                         else:
-                            out = _filter("content", v)
+                            if not _skip_ct or not (v and all(c in '!！,，﻿' for c in v)):
+                                _skip_ct = False; yield ("content", v)
                     elif fragment_type == "THINK" and thinking_enabled:
-                        out = _filter("thinking", v)
+                        if not _skip_th or not (v and all(c in '!！,，﻿' for c in v)):
+                            _skip_th = False; yield ("thinking", v)
                     elif fragment_type == "RESPONSE":
-                        out = _filter("content", v)
-                    if out:
-                        yield out
+                        if not _skip_ct or not (v and all(c in '!！,，﻿' for c in v)):
+                            _skip_ct = False; yield ("content", v)
                     elif fragment_type == "THINK" and thinking_enabled:
                         yield ("thinking", v)
                     elif fragment_type == "RESPONSE":
@@ -2069,22 +2054,24 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
                 if path == "response/content" and obj.get("o") == "APPEND":
                     phase = "content"
                     _content_seen = True
-                    out = _filter("content", v)
-                    if out: yield out
+                    if not _skip_ct or not (v and all(c in '!！,，﻿' for c in v)):
+                        _skip_ct = False; yield ("content", v)
                 elif path == "response/thinking_content" and thinking_enabled:
                     phase = "thinking"
-                    out = _filter("thinking", v)
-                    if out: yield out
+                    if not _skip_th or not (v and all(c in '!！,，﻿' for c in v)):
+                        _skip_th = False; yield ("thinking", v)
                 elif path:
                     continue
                 elif isinstance(v, str) and v:
                     if _content_seen:
-                        out = _filter("content", v)
+                        if not _skip_ct or not (v and all(c in '!！,，﻿' for c in v)):
+                            _skip_ct = False; yield ("content", v)
                     elif phase == "thinking" and thinking_enabled:
-                        out = _filter("thinking", v)
+                        if not _skip_th or not (v and all(c in '!！,，﻿' for c in v)):
+                            _skip_th = False; yield ("thinking", v)
                     else:
-                        out = _filter("content", v)
-                    if out: yield out
+                        if not _skip_ct or not (v and all(c in '!！,，﻿' for c in v)):
+                            _skip_ct = False; yield ("content", v)
             except json.JSONDecodeError:
                 continue
 
