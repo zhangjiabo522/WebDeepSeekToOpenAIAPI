@@ -1,6 +1,11 @@
 """
-DeepSeek 网页 → API 代理（纯 HTTP 转发，无浏览器依赖）
-用法: python proxy.py [--port PORT]  例如: python proxy.py --port 8080
+# WebDeepSeekToOpenAIAPI
+# DeepSeek 网页 → OpenAI 兼容 API 代理
+# MIT License | Copyright (c) 2025
+# 特别感谢 Fly143 (https://github.com/Fly143) 的技术支持
+#
+# 功能: 多账号管理 | 流式对话 | 工具调用 | 多模态图片识别 | 实时日志 | 数据统计
+# 用法: python proxy.py [--port PORT]  例如: python proxy.py --port 8080
 """
 import json, os, shlex, time, uuid, webbrowser, base64, re, secrets, asyncio, random, threading, queue, sys
 from pathlib import Path
@@ -2179,9 +2184,10 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
             log_error(f"nonstream error: {e}")
             raise HTTPException(502, detail={"error": {"message": str(e), "type": "server_error"}})
 
-        # 过滤前导 !
-        if full_content and full_content[0] == '\uff01':
+        # 过滤前导 ! 和空格
+        if full_content and full_content[0] in ('\uff01', '!'):
             full_content = full_content[1:]
+        full_content = full_content.lstrip()
 
         finish_reason = "stop"
         tc_result = None

@@ -347,4 +347,6 @@ tail -f ~/dsapi.log
 
 ## License
 
-MIT
+MIT License | Copyright (c) 2025
+
+特别感谢 [Fly143](https://github.com/Fly143) 的技术支持。
