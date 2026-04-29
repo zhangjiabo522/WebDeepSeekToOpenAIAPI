@@ -1951,6 +1951,24 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
         fragment_type = None
         _line_buf = b""
         _content_seen = not thinking_enabled
+        _first_out = {"content": True, "thinking": True}
+
+        def _filter(etype, val):
+            nonlocal _first_out
+            if _first_out.get(etype, False):
+                _first_out[etype] = False
+                # 首字符如果是孤立的 artifact 符号则丢弃整块
+                if val and all(c in '!！,，:：\uff01\n ' for c in val):
+                    return None
+            return (etype, val)
+
+        def _yield(etype, val):
+            nonlocal _first_out
+            if _first_out.get(etype, False) and val and len(val) == 1 and val in '!！,，:：':
+                _first_out[etype] = False
+                return  # 丢弃孤立的单字符 artifact
+            _first_out[etype] = False
+            yield (etype, val)
 
         def _read_lines():
             nonlocal _line_buf
@@ -2026,15 +2044,18 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
 
                 # ── Fragments format (vision/reasoner models) ──
                 if path and "fragments" in path:
+                    out = None
                     if fragment_type is None:
                         if thinking_enabled:
-                            yield ("thinking", v)
+                            out = _filter("thinking", v)
                         else:
-                            yield ("content", v)
+                            out = _filter("content", v)
                     elif fragment_type == "THINK" and thinking_enabled:
-                        yield ("thinking", v)
+                        out = _filter("thinking", v)
                     elif fragment_type == "RESPONSE":
-                        yield ("content", v)
+                        out = _filter("content", v)
+                    if out:
+                        yield out
                     elif fragment_type == "THINK" and thinking_enabled:
                         yield ("thinking", v)
                     elif fragment_type == "RESPONSE":
@@ -2048,19 +2069,22 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
                 if path == "response/content" and obj.get("o") == "APPEND":
                     phase = "content"
                     _content_seen = True
-                    yield ("content", v)
+                    out = _filter("content", v)
+                    if out: yield out
                 elif path == "response/thinking_content" and thinking_enabled:
                     phase = "thinking"
-                    yield ("thinking", v)
+                    out = _filter("thinking", v)
+                    if out: yield out
                 elif path:
                     continue
                 elif isinstance(v, str) and v:
                     if _content_seen:
-                        yield ("content", v)
+                        out = _filter("content", v)
                     elif phase == "thinking" and thinking_enabled:
-                        yield ("thinking", v)
+                        out = _filter("thinking", v)
                     else:
-                        yield ("content", v)
+                        out = _filter("content", v)
+                    if out: yield out
             except json.JSONDecodeError:
                 continue
 
@@ -2198,10 +2222,8 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
             log_error(f"nonstream error: {e}")
             raise HTTPException(502, detail={"error": {"message": str(e), "type": "server_error"}})
 
-        # 仅过滤 DeepSeek 特有前导 ！
-        if full_content and full_content[0] == '\uff01':
-            full_content = full_content[1:]
         full_content = full_content.lstrip()
+        full_thinking = full_thinking.lstrip()
 
         finish_reason = "stop"
         tc_result = None
