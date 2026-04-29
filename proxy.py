@@ -2168,6 +2168,7 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
                 elif etype == "thinking":
                     full_thinking += val
                 elif etype == "error":
+                    log_error(f"DeepSeek SSE error: {val}")
                     raise HTTPException(502, detail={"error": {"message": val["message"], "type": "server_error", "code": val.get("code")}})
 
         except HTTPException:
