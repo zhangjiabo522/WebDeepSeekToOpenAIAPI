@@ -1599,7 +1599,10 @@ def upload_file_to_deepseek(cfg: dict, file_name: str, file_data: bytes, content
     # 对于上传请求需要 multipart
     upload_headers = {k: v for k, v in headers.items() if k.lower() not in ("content-type",)}
     try:
-        multipart_data = {"file": (file_name, file_data, content_type)}
+        import io
+        multipart_data = [
+            {"field": "file", "filename": file_name, "content": file_data, "type": content_type},
+        ]
         resp = cffi_requests.post(
             "https://chat.deepseek.com/api/v0/file/upload",
             multipart=multipart_data,
