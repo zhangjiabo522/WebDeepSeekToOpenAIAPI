@@ -1652,6 +1652,7 @@ def wait_for_file_parsing(cfg: dict, file_ids: list, timeout: int = 30) -> list:
     """等待 DeepSeek 完成文件解析。"""
     if not file_ids:
         return []
+    log_info(f"等待文件解析: {file_ids}")
     start = time.time()
     while time.time() - start < timeout:
         try:
@@ -1666,22 +1667,25 @@ def wait_for_file_parsing(cfg: dict, file_ids: list, timeout: int = 30) -> list:
                 data = resp.json()
                 biz = data.get("data", {}).get("biz_data", {})
                 files = biz.get("files", [])
-                all_done = True
-                parsed = []
-                for f in files:
-                    fid = f.get("id") or f.get("file_id", "")
-                    status = str(f.get("status", "")).upper()
-                    if status in ("SUCCESS", "COMPLETED"):
-                        parsed.append(fid)
-                    elif status in ("PENDING", "PARSING", "UPLOADING", "QUEUED"):
-                        all_done = False
-                if all_done:
-                    return parsed
+                log_info(f"文件状态: {[(f.get('id',''), f.get('status','')) for f in files]}")
+                parsed = [f.get("id") or f.get("file_id", "") for f in files
+                          if str(f.get("status", "")).upper() in ("SUCCESS", "COMPLETED")]
+                pending = [f for f in files
+                           if str(f.get("status", "")).upper() in ("PENDING", "PARSING", "UPLOADING", "QUEUED")]
+                if not pending:
+                    if parsed:
+                        log_info(f"文件解析完成: {parsed}")
+                        return parsed
+                    return []
                 if parsed and time.time() - start > 5:
+                    log_info(f"部分文件就绪: {parsed}")
                     return parsed
-        except Exception:
-            pass
-        time.sleep(1)
+            else:
+                log_warn(f"文件状态查询: HTTP {resp.status_code}")
+        except Exception as e:
+            log_warn(f"文件状态查询异常: {e}")
+        time.sleep(2)
+    log_warn(f"文件解析超时: {file_ids}")
     return []
 
 
@@ -1745,6 +1749,7 @@ def process_vision_images(cfg: dict, messages: list) -> (list, dict):
                 ref_file_ids.append(forked_fid)
 
     if ref_file_ids:
+        log_info(f"视觉 ref_file_ids: {ref_file_ids}")
         # 等待解析完成
         ref_file_ids = wait_for_file_parsing(cfg, ref_file_ids)
         # 为视觉请求创建新 session
