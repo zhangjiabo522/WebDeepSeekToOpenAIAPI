@@ -1588,6 +1588,8 @@ def build_request_headers(cfg: dict, session_id: str) -> dict:
     req_headers["content-type"] = "application/json"
     req_headers["origin"] = "https://chat.deepseek.com"
     req_headers["referer"] = f"https://chat.deepseek.com/a/chat/s/{session_id}"
+    req_headers["x-client-version"] = "2.0.2"
+    req_headers["x-client-platform"] = "web"
     return req_headers
 
 
