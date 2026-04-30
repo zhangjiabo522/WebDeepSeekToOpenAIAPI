@@ -487,11 +487,11 @@ hr{border:none;border-top:1px solid #334155;margin:16px 0}
     <input type="text" id="xClientVersion" placeholder="1.0.0-always">
   </div>
   <div class="card">
-    <div class="card-title">强制 Default Model Type</div>
-    <div style="font-size:12px;color:#64748b;margin-bottom:8px">账号未收到灰度（Expert/Vision 被拒）时开启，所有请求用 default 模型类型</div>
+    <div class="card-title">灰度绕过模式</div>
+    <div style="font-size:12px;color:#64748b;margin-bottom:8px">账号未收到灰度（Expert/Vision 提示版本过低）时开启，去除 x-client-version 绕过校验</div>
     <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#e2e8f0">
       <input type="checkbox" id="forceDefaultModelType" style="width:auto">
-      强制使用 default（未灰度账号必须开启）
+      绕过灰度校验（未灰度账号开启此项即可使用 Vision/Expert）
     </label>
   </div>
   <div class="card">
@@ -1618,7 +1618,9 @@ def build_request_headers(cfg: dict, session_id: str) -> dict:
     req_headers["content-type"] = "application/json"
     req_headers["origin"] = "https://chat.deepseek.com"
     req_headers["referer"] = f"https://chat.deepseek.com/a/chat/s/{session_id}"
-    req_headers["x-client-version"] = _get_client_version()
+    settings = _load_settings()
+    if not settings.get("force_default_model_type"):
+        req_headers["x-client-version"] = _get_client_version()
     req_headers["x-client-platform"] = "web"
     return req_headers
 
@@ -1977,10 +1979,16 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
         "search_enabled": search_enabled,
     }
     # 设置 model_type，灰度未覆盖时自动回退 default
-    # 设置 model_type：灰度未覆盖账号可开启 force_default_model_type
+    # 设置 model_type：灰度未覆盖账号开启 force_default 后去版本号但保留 model_type
     settings = _load_settings()
     if settings.get("force_default_model_type"):
-        req_body["model_type"] = "default"
+        # 去掉 x-client-version 但保留正确的 model_type，绕过灰度检查
+        if ref_file_ids or "vision" in model:
+            req_body["model_type"] = "vision"
+        elif "expert" in model:
+            req_body["model_type"] = "expert"
+        else:
+            req_body["model_type"] = "default"
     elif ref_file_ids or "vision" in model:
         req_body["model_type"] = "vision"
     elif "expert" in model:
@@ -2034,7 +2042,7 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
             if not line:
                 continue
 
-            if line.startswith("event:"):
+            if line.startswith("event:") or line.startswith(":"):
                 continue
 
             # HTML/text error response
@@ -2045,7 +2053,7 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
                 })
                 return
 
-            if non_json_line_count >= 3:
+            if non_json_line_count >= 15:
                 yield ("error", {
                     "message": f"DeepSeek returned non-SSE text (too many non-JSON lines): first={line[:200]}",
                     "code": "non_sse_response"
