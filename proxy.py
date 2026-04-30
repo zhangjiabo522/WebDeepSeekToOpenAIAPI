@@ -2220,7 +2220,7 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
                 log_warn("Token 401, 尝试刷新...")
                 new_cfg = relogin(cfg)
                 if new_cfg:
-                    for chunk in _do_chat_stream_only(new_cfg, prompt, model, thinking_enabled, search_enabled, has_tools, tools):
+                    for chunk in _do_chat_stream_only(new_cfg, prompt, model, thinking_enabled, search_enabled, has_tools, tools, ref_file_ids):
                         yield chunk
                     return
                 yield f'data: {json.dumps({"error": {"message": "Token expired", "type": "auth_error", "code": 401}})}\n\n'
@@ -2417,8 +2417,8 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
     return do_nonstream()
 
 
-def _do_chat_stream_only(cfg, prompt, model, thinking_enabled, search_enabled, has_tools=False, tools=None):
-    result = _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream=True, is_retry=True, has_tools=has_tools, tools=tools)
+def _do_chat_stream_only(cfg, prompt, model, thinking_enabled, search_enabled, has_tools=False, tools=None, ref_file_ids=None):
+    result = _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream=True, is_retry=True, has_tools=has_tools, tools=tools, ref_file_ids=ref_file_ids)
     if isinstance(result, StreamingResponse):
         yield from result.body_iterator
     else:
