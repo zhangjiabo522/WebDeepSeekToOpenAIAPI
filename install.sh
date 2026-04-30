@@ -191,18 +191,19 @@ echo -e "${GREEN}╠════════════════════
 echo -e "${GREEN}║  端口: $PORT                                ║${NC}"
 echo -e "${GREEN}║  目录: ${INSTALL_DIR}                      ║${NC}"
 echo -e "${GREEN}╠══════════════════════════════════════════════╣${NC}"
-echo -e "${GREEN}║  启动:                                      ║${NC}"
+echo -e "${GREEN}║  后台启动:                                  ║${NC}"
+echo -e "${GREEN}║    PROXY_PORT=$PORT bash deploy.sh --bg      ║${NC}"
+echo -e "${GREEN}║  前台启动:                                  ║${NC}"
 echo -e "${GREEN}║    PROXY_PORT=$PORT python3 proxy.py         ║${NC}"
-echo -e "${GREEN}║    或后台: PROXY_PORT=$PORT bash deploy.sh --bg║${NC}"
 echo -e "${GREEN}╠══════════════════════════════════════════════╣${NC}"
 echo -e "${GREEN}║  管理: http://localhost:$PORT/admin         ║${NC}"
 echo -e "${GREEN}║  账号: $WEB_USER  密码: $WEB_PASS          ║${NC}"
 echo -e "${GREEN}║  API:  http://localhost:$PORT/v1            ║${NC}"
-echo -e "${GREEN}║  启动后登录 DeepSeek 账号即可使用           ║${NC}"
+echo -e "${GREEN}║  登录账号后可开启灰度绕过模式               ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════╝${NC}"
 echo ""
 
-read -p "立即启动? [Y/n] " -n 1 -r
+read -p "是否后台启动? [Y/n] " -n 1 -r
 echo
 if [[ $REPLY =~ ^[Nn]$ ]]; then
     echo "手动运行: export PROXY_PORT=$PORT && cd ${INSTALL_DIR} && python3 proxy.py"
@@ -210,4 +211,10 @@ if [[ $REPLY =~ ^[Nn]$ ]]; then
 fi
 cd "$INSTALL_DIR"
 export PROXY_PORT="$PORT"
-exec python3 proxy.py
+nohup python3 proxy.py > ~/dsapi.log 2>&1 &
+sleep 2
+if curl -s "http://localhost:$PORT/health" | grep -q "ok"; then
+    info "后台启动成功！管理: http://localhost:$PORT/admin"
+else
+    warn "启动中，请检查日志: tail -f ~/dsapi.log"
+fi
