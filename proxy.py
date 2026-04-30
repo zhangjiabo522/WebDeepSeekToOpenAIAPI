@@ -1996,6 +1996,8 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
     else:
         req_body["model_type"] = "default"
 
+    _transient_retried = is_retry  # 复用 is_retry 避免无限重试
+
     chat_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     created = int(time.time())
 
@@ -2263,7 +2265,15 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
                              "choices": [{"index": 0, "delta": {"reasoning_content": val}, "finish_reason": None}]}
                         yield f'data: {json.dumps(r, ensure_ascii=False)}\n\n'
                     elif etype == "error":
-                        yield f'data: {json.dumps({"error": {"message": val["message"], "type": "server_error", "code": val.get("code")}})}\n\n'
+                        msg = val.get("message", "")
+                        if not _transient_retried and ("temporarily unavailable" in msg.lower() or "try again" in msg.lower()):
+                            log_warn(f"Vision 暂时不可用，2秒后重试...")
+                            import asyncio as _asyncio
+                            time.sleep(2)
+                            for chunk in _do_chat_stream_only(cfg, prompt, model, thinking_enabled, search_enabled, has_tools, tools, ref_file_ids):
+                                yield chunk
+                            return
+                        yield f'data: {json.dumps({"error": {"message": msg, "type": "server_error", "code": val.get("code")}})}\n\n'
                         yield "data: [DONE]\n\n"
                         return
                     elif etype == "done":
@@ -2314,7 +2324,14 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
                          "choices": [{"index": 0, "delta": {"reasoning_content": val}, "finish_reason": None}]}
                     yield f'data: {json.dumps(r, ensure_ascii=False)}\n\n'
                 elif etype == "error":
-                    yield f'data: {json.dumps({"error": {"message": val["message"], "type": "server_error", "code": val.get("code")}})}\n\n'
+                    msg = val.get("message", "")
+                    if not _transient_retried and ("temporarily unavailable" in msg.lower() or "try again" in msg.lower()):
+                        log_warn(f"Vision 暂时不可用，2秒后重试...")
+                        time.sleep(2)
+                        for chunk in _do_chat_stream_only(cfg, prompt, model, thinking_enabled, search_enabled, has_tools, tools, ref_file_ids):
+                            yield chunk
+                        return
+                    yield f'data: {json.dumps({"error": {"message": msg, "type": "server_error", "code": val.get("code")}})}\n\n'
                     yield "data: [DONE]\n\n"
                     return
                 elif etype == "done":
@@ -2355,8 +2372,13 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
                 elif etype == "thinking":
                     full_thinking += val
                 elif etype == "error":
+                    msg = val.get("message", "")
+                    if not _transient_retried and ("temporarily unavailable" in msg.lower() or "try again" in msg.lower()):
+                        log_warn(f"Vision 暂时不可用，2秒后重试...")
+                        time.sleep(2)
+                        return _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, False, is_retry=True, has_tools=has_tools, tools=tools, ref_file_ids=ref_file_ids)
                     log_error(f"DeepSeek SSE error: {val}")
-                    raise HTTPException(502, detail={"error": {"message": val["message"], "type": "server_error", "code": val.get("code")}})
+                    raise HTTPException(502, detail={"error": {"message": msg, "type": "server_error", "code": val.get("code")}})
 
         except HTTPException:
             raise
