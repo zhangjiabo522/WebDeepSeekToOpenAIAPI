@@ -1927,9 +1927,9 @@ def _track_and_return(result, t0, model, stream, input_tokens):
     if isinstance(result, StreamingResponse):
         orig_iter = result.body_iterator
 
-        def _counting_iter():
+        async def _counting_iter():
             buf = ""
-            for chunk in orig_iter:
+            async for chunk in orig_iter:
                 if isinstance(chunk, bytes):
                     chunk = chunk.decode("utf-8", errors="ignore")
                 buf += chunk
@@ -2206,6 +2206,8 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
                 continue
 
     def do_stream():
+        with open("/tmp/debug_proxy.log", "a") as f:
+            f.write(f"DO_STREAM_CALLED\n")
         try:
             resp = cffi_requests.post(
                 "https://chat.deepseek.com/api/v0/chat/completion",
@@ -2268,7 +2270,6 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
                         msg = val.get("message", "")
                         if not _transient_retried and ("temporarily unavailable" in msg.lower() or "try again" in msg.lower()):
                             log_warn(f"Vision 暂时不可用，2秒后重试...")
-                            import asyncio as _asyncio
                             time.sleep(2)
                             for chunk in _do_chat_stream_only(cfg, prompt, model, thinking_enabled, search_enabled, has_tools, tools, ref_file_ids):
                                 yield chunk
@@ -2412,15 +2413,20 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
         })
 
     if stream:
+        if is_retry:
+            return do_stream()  # 返回原始同步 generator，避免 StreamingResponse 异步包装
         return StreamingResponse(do_stream(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
     return do_nonstream()
 
 
 def _do_chat_stream_only(cfg, prompt, model, thinking_enabled, search_enabled, has_tools=False, tools=None, ref_file_ids=None):
+    # is_retry=True 时 _do_chat 直接返回同步 generator，不经过 StreamingResponse 包装
     result = _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream=True, is_retry=True, has_tools=has_tools, tools=tools, ref_file_ids=ref_file_ids)
     if isinstance(result, StreamingResponse):
         yield from result.body_iterator
+    elif hasattr(result, '__iter__'):
+        yield from result
     else:
         yield f"data: {json.dumps({'error': {'message': 'Retry returned non-stream', 'type': 'server_error'}})}\n\n"
         yield "data: [DONE]\n\n"
