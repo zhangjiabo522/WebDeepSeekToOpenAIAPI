@@ -1233,7 +1233,7 @@ async def frontend_chat(request: Request):
     thinking_enabled, search_enabled, _, _, _ = model_info
 
     prompt = convert_messages_for_deepseek(messages)
-    input_tokens = max(1, len(prompt))
+    input_tokens = max(1, _estimate_tokens(prompt))
     t0 = time.time()
     result = _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream,
                     is_retry=False, has_tools=False, tools=None, ref_file_ids=ref_file_ids)
@@ -1872,11 +1872,27 @@ async def chat(request: Request):
         else:
             prompt = tool_prompt + "\n\n" + prompt
 
-    input_tokens = max(1, len(prompt))
+    input_tokens = max(1, _estimate_tokens(prompt))
     t0 = time.time()
     result = _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream,
                     is_retry=False, has_tools=bool(tools), tools=tools, ref_file_ids=ref_file_ids)
     return _track_and_return(result, t0, model, stream, input_tokens)
+
+
+def _estimate_tokens(text: str) -> int:
+    """粗估 token 数，兼容中英文混合文本。
+    CJK 字符约 0.6 token/字，非 CJK 约 0.25 token/字符（即 ~4 字符/token）。"""
+    if not text:
+        return 0
+    cjk = 0
+    for ch in text:
+        cp = ord(ch)
+        if (0x4E00 <= cp <= 0x9FFF or 0x3400 <= cp <= 0x4DBF or
+            0x3000 <= cp <= 0x303F or 0xFF00 <= cp <= 0xFFEF or
+            0x2000 <= cp <= 0x206F):
+            cjk += 1
+    non_cjk = len(text) - cjk
+    return max(1, int(cjk * 0.6 + non_cjk * 0.25))
 
 
 def _track_and_return(result, t0, model, stream, input_tokens):
@@ -1901,7 +1917,7 @@ def _track_and_return(result, t0, model, stream, input_tokens):
                             parts.append(c)
                     except Exception:
                         pass
-            output_tokens = max(1, len("".join(parts)))
+            output_tokens = max(1, _estimate_tokens("".join(parts)))
             elapsed_ms = int((time.time() - t0) * 1000)
             track_api_call(model, True, input_tokens, output_tokens, elapsed_ms)
 
@@ -1913,7 +1929,7 @@ def _track_and_return(result, t0, model, stream, input_tokens):
         try:
             body = json.loads(result.body) if hasattr(result, 'body') else {}
             content = body.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
-            output_tokens = max(1, len(content))
+            output_tokens = max(1, _estimate_tokens(content))
         except Exception:
             output_tokens = input_tokens
         track_api_call(model, stream, input_tokens, output_tokens, elapsed_ms)
@@ -1951,8 +1967,9 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
         fragment_type = None
         _line_buf = b""
         _content_seen = not thinking_enabled
-        _skip_ct = True   # 跳过第一个纯 artifact 的 content chunk
-        _skip_th = True   # 跳过第一个纯 artifact 的 thinking chunk
+        _first_ct = True   # 首个 content chunk 需要 lstrip artifact 符号
+        _first_th = True   # 首个 thinking chunk 需要 lstrip artifact 符号
+        _artifact = '!！,，﻿​'
 
         def _read_lines():
             nonlocal _line_buf
@@ -2030,23 +2047,28 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
                 if path and "fragments" in path:
                     if fragment_type is None:
                         if thinking_enabled:
-                            if not _skip_th or not (v and all(c in '!！,，﻿' for c in v)):
-                                _skip_th = False; yield ("thinking", v)
+                            if _first_th:
+                                v = v.lstrip(_artifact)
+                                if not v: continue
+                                _first_th = False
+                            yield ("thinking", v)
                         else:
-                            if not _skip_ct or not (v and all(c in '!！,，﻿' for c in v)):
-                                _skip_ct = False; yield ("content", v)
+                            if _first_ct:
+                                v = v.lstrip(_artifact)
+                                if not v: continue
+                                _first_ct = False
+                            yield ("content", v)
                     elif fragment_type == "THINK" and thinking_enabled:
-                        if not _skip_th or not (v and all(c in '!！,，﻿' for c in v)):
-                            _skip_th = False; yield ("thinking", v)
-                    elif fragment_type == "RESPONSE":
-                        if not _skip_ct or not (v and all(c in '!！,，﻿' for c in v)):
-                            _skip_ct = False; yield ("content", v)
-                    elif fragment_type == "THINK" and thinking_enabled:
+                        if _first_th:
+                            v = v.lstrip(_artifact)
+                            if not v: continue
+                            _first_th = False
                         yield ("thinking", v)
                     elif fragment_type == "RESPONSE":
-                        if _first_content and v and v[0] == '\uff01':
-                            v = v[1:]
-                        _first_content = False
+                        if _first_ct:
+                            v = v.lstrip(_artifact)
+                            if not v: continue
+                            _first_ct = False
                         yield ("content", v)
                     continue
 
@@ -2054,24 +2076,39 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
                 if path == "response/content" and obj.get("o") == "APPEND":
                     phase = "content"
                     _content_seen = True
-                    if not _skip_ct or not (v and all(c in '!！,，﻿' for c in v)):
-                        _skip_ct = False; yield ("content", v)
+                    if _first_ct:
+                        v = v.lstrip(_artifact)
+                        if not v: continue
+                        _first_ct = False
+                    yield ("content", v)
                 elif path == "response/thinking_content" and thinking_enabled:
                     phase = "thinking"
-                    if not _skip_th or not (v and all(c in '!！,，﻿' for c in v)):
-                        _skip_th = False; yield ("thinking", v)
+                    if _first_th:
+                        v = v.lstrip(_artifact)
+                        if not v: continue
+                        _first_th = False
+                    yield ("thinking", v)
                 elif path:
                     continue
                 elif isinstance(v, str) and v:
                     if _content_seen:
-                        if not _skip_ct or not (v and all(c in '!！,，﻿' for c in v)):
-                            _skip_ct = False; yield ("content", v)
+                        if _first_ct:
+                            v = v.lstrip(_artifact)
+                            if not v: continue
+                            _first_ct = False
+                        yield ("content", v)
                     elif phase == "thinking" and thinking_enabled:
-                        if not _skip_th or not (v and all(c in '!！,，﻿' for c in v)):
-                            _skip_th = False; yield ("thinking", v)
+                        if _first_th:
+                            v = v.lstrip(_artifact)
+                            if not v: continue
+                            _first_th = False
+                        yield ("thinking", v)
                     else:
-                        if not _skip_ct or not (v and all(c in '!！,，﻿' for c in v)):
-                            _skip_ct = False; yield ("content", v)
+                        if _first_ct:
+                            v = v.lstrip(_artifact)
+                            if not v: continue
+                            _first_ct = False
+                        yield ("content", v)
             except json.JSONDecodeError:
                 continue
 
