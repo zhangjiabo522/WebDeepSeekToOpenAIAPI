@@ -223,6 +223,25 @@ def extract_tool_call(content, tool_names=None):
             result = normalize_tool_call({"name": fname, "arguments": args})
             if result: return [result], clean_tool_text(content)
 
+    # Strategy 4: <execute_operation> XML (DeepSeek 自由格式)
+    eo = re.search(r"<execute_operation>(.*?)</execute_operation>", content, re.DOTALL)
+    if eo and not _is_inside_think(content, eo.start()):
+        inner = eo.group(1)
+        cmd_m = re.search(r"<command>(.*?)</command>", inner, re.DOTALL)
+        if cmd_m:
+            command = cmd_m.group(1).strip()
+            if command:
+                resolved = None
+                if tool_names:
+                    for tn in tool_names:
+                        if tn.lower() in ("terminal", "shell", "exec", "run_command", "execute"):
+                            resolved = tn; break
+                    if not resolved:
+                        resolved = next(iter(tool_names))
+                if resolved:
+                    result = normalize_tool_call({"name": resolved, "arguments": {"command": command}})
+                    if result: return [result], clean_tool_text(content)
+
     return None, content
 
 
@@ -234,8 +253,12 @@ def clean_tool_text(content):
     content = re.sub(r"<parameter=\w+>.*?</parameter>", "", content, flags=re.DOTALL)
     content = re.sub(r"<parameter=\w+>", "", content)
     content = re.sub(r"</parameter>", "", content)
+    content = re.sub(r"<execute_operation>.*?</execute_operation>", "", content, flags=re.DOTALL)
     content = re.sub(r"```(?:json)?\s*\n?\s*\{.*?\"tool_call\".*?\}\s*\n?\s*```", "", content, flags=re.DOTALL)
     content = re.sub(r"```\w*\s*\n?\s*```", "", content)
+    content = re.sub(r"\[citation:\d+\]", "", content)
+    content = re.sub(r"\[TOOL_RESULT\].*", "", content, flags=re.MULTILINE)
+    content = re.sub(r"\[SYS\]\s*工具已执行完毕.*?(?=\n\[|\Z)", "", content, flags=re.DOTALL)
     content = re.sub(r"^\s*webSearch\b", "", content, flags=re.MULTILINE)
     content = re.sub(r"\n{3,}", "\n\n", content)
     return content.strip()
@@ -264,22 +287,34 @@ def convert_messages_for_deepseek(messages, tools=None):
                     args_str = fn.get("arguments", "{}")
                     try:
                         args = json.loads(args_str) if isinstance(args_str, str) else args_str
+                        # flatten: unwrap single "input" key with dict-like string
+                        if isinstance(args, dict) and len(args) == 1 and "input" in args:
+                            inner = args["input"]
+                            if isinstance(inner, str):
+                                try: args = json.loads(inner.replace("'", chr(34)))
+                                except (json.JSONDecodeError, ValueError): args = {"command": inner}
                         kv = ", ".join(str(k) + "=" + str(v) for k, v in args.items())
                     except (json.JSONDecodeError, AttributeError):
                         kv = args_str
                     tc_lines.append("TOOL_CALL: " + name + "(" + kv + ")")
-                text_content = content if content else ""
-                assistant_text = str(text_content) + "\n" if text_content else ""
-                assistant_text += "\n".join(tc_lines)
-                out.append("[ASST]\n" + assistant_text + "\n")
+                out.append("[ASST]\n" + "\n".join(tc_lines) + "\n")
             elif content:
                 out.append("[ASST]\n" + str(content) + "\n")
         elif role == "tool":
-            tool_name = msg.get("name", "")
-            if isinstance(content, list):
-                text = " ".join(p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text")
-            else:
-                text = str(content) if content else ""
-            label = "TOOL_RESULT " + tool_name if tool_name else "TOOL_RESULT"
-            out.append("[" + label + "]\n" + text + "\n")
+            # unwrap JSON envelope to get actual output
+            text = str(content) if content else ""
+            if text:
+                try:
+                    rd = json.loads(text)
+                    if isinstance(rd, dict):
+                        parts = []
+                        for k in ("output", "error", "result", "content"):
+                            v = rd.get(k)
+                            if v is not None and str(v).strip():
+                                parts.append(str(v).strip())
+                        if parts:
+                            text = "\n".join(parts)
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            out.append("[SYS]\n工具已执行完毕，以下是输出:\n" + text[:500] + "\n")
     return "\n".join(out)

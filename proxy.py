@@ -288,6 +288,7 @@ def _load_settings() -> dict:
         "account_strategy": "random",
         "api_key": "sk-default",
         "default_model": "deepseek-chat",
+        "x_client_version": "2.0.2",
     }
     if SETTINGS_FILE.exists():
         try:
@@ -300,6 +301,12 @@ def _load_settings() -> dict:
 
 def _save_settings(settings: dict):
     SETTINGS_FILE.write_text(json.dumps(settings, ensure_ascii=False, indent=2), "utf-8")
+
+
+def _get_client_version() -> str:
+    """获取当前 x-client-version，优先使用设置中配置的版本。"""
+    settings = _load_settings()
+    return settings.get("x_client_version", "2.0.2").strip() or "2.0.2"
 
 
 # ── FastAPI ────────────────────────────────────────────
@@ -472,6 +479,11 @@ hr{border:none;border-top:1px solid #334155;margin:16px 0}
     <div class="card-title">API 密钥</div>
     <div style="font-size:12px;color:#64748b;margin-bottom:8px">第三方客户端调用时需要填的 API Key（留空则不校验）</div>
     <input type="text" id="apiKey" placeholder="sk-default">
+  </div>
+  <div class="card">
+    <div class="card-title">X-Client-Version</div>
+    <div style="font-size:12px;color:#64748b;margin-bottom:8px">与 DeepSeek 网页端版本一致（当前默认 2.0.2），遇到 "Update to the latest version to use Expert/Vision" 时请更新</div>
+    <input type="text" id="xClientVersion" placeholder="2.0.2">
   </div>
   <div class="card">
     <div class="card-title">修改管理密码</div>
@@ -707,6 +719,7 @@ async function loadSettings(){
     $('defaultModel').value=d.default_model||'deepseek-chat';
     $('chatModel').value=d.default_model||'deepseek-chat';
     $('apiKey').value=d.api_key||'sk-default';
+    $('xClientVersion').value=d.x_client_version||'2.0.2';
   }catch(e){}
 }
 async function saveSettings(){
@@ -715,6 +728,7 @@ async function saveSettings(){
     account_strategy:$('accountStrategy').value,
     default_model:$('defaultModel').value,
     api_key:$('apiKey').value,
+    x_client_version:$('xClientVersion').value,
   };
   try{
     const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
@@ -975,7 +989,7 @@ async def deepseek_login(data: dict):
         "origin": "https://chat.deepseek.com",
         "referer": "https://chat.deepseek.com/",
         "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/134.0.0.0 Safari/537.36",
-        "x-client-version": "2.0.2",
+        "x-client-version": _get_client_version(),
         "x-client-platform": "web",
     }
 
@@ -1140,6 +1154,7 @@ async def save_settings(data: dict):
     s["account_strategy"] = data.get("account_strategy", s.get("account_strategy", "random"))
     s["api_key"] = data.get("api_key", s.get("api_key", "sk-default"))
     s["default_model"] = data.get("default_model", s.get("default_model", "deepseek-chat"))
+    s["x_client_version"] = data.get("x_client_version", s.get("x_client_version", "2.0.2"))
     _save_settings(s)
     log_info("设置已保存")
     return {"ok": True}
@@ -1268,7 +1283,7 @@ def _discover_models() -> dict:
     headers = {
         "Authorization": f"Bearer {token}",
         "User-Agent": ua,
-        "X-Client-Version": "2.0.2",
+        "X-Client-Version": _get_client_version(),
         "X-Client-Platform": "web",
     }
 
@@ -1286,10 +1301,8 @@ def _discover_models() -> dict:
         models = {}
         for mc in model_configs:
             mt = mc.get("model_type")
-            if not mt:
+            if not mt or not mc.get("enabled"):
                 continue
-
-            enabled = mc.get("enabled", False)
             ff = mc.get("file_feature") or {}
             max_in = ff.get("token_limit", 1048576)
             max_out = ff.get("token_limit_with_thinking", 393216)
@@ -1384,7 +1397,7 @@ def relogin(cfg: dict) -> dict | None:
         "origin": "https://chat.deepseek.com",
         "referer": "https://chat.deepseek.com/",
         "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/134.0.0.0 Safari/537.36",
-        "x-client-version": "2.0.2",
+        "x-client-version": _get_client_version(),
         "x-client-platform": "web",
     }
 
@@ -1593,7 +1606,7 @@ def build_request_headers(cfg: dict, session_id: str) -> dict:
     req_headers["content-type"] = "application/json"
     req_headers["origin"] = "https://chat.deepseek.com"
     req_headers["referer"] = f"https://chat.deepseek.com/a/chat/s/{session_id}"
-    req_headers["x-client-version"] = "2.0.2"
+    req_headers["x-client-version"] = _get_client_version()
     req_headers["x-client-platform"] = "web"
     return req_headers
 
@@ -1963,12 +1976,30 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
     created = int(time.time())
 
     def _parse_sse(resp):
+        """Parse DeepSeek SSE stream → (type, value) tuples.
+        type: "content" | "thinking" | "error" | "done"
+        Handles: old format (response/content), new fragments format (vision/reasoner).
+        """
+        # Pre-flight: detect non-SSE responses (HTML errors, etc.)
+        ct = resp.headers.get("content-type", "")
+        if ct and "text/event-stream" not in ct and "application/json" not in ct:
+            body_sample = ""
+            try:
+                body_sample = resp.text[:300] if hasattr(resp, "text") else ""
+            except Exception:
+                pass
+            yield ("error", {
+                "message": f"DeepSeek returned non-SSE response (Content-Type: {ct}): {body_sample}",
+                "code": "bad_content_type"
+            })
+            return
+
+        non_json_line_count = 0
         phase = "thinking" if thinking_enabled else "content"
         fragment_type = None
         _line_buf = b""
-        _content_seen = not thinking_enabled
-        _first_ct = True   # 首个 content chunk 需要 lstrip artifact 符号
-        _first_th = True   # 首个 thinking chunk 需要 lstrip artifact 符号
+        _first_ct = True
+        _first_th = True
         _artifact = '!！,，﻿​'
 
         def _read_lines():
@@ -1990,6 +2021,22 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
             if line.startswith("event:"):
                 continue
 
+            # HTML/text error response
+            if line.startswith("<!DOCTYPE") or line.startswith("<html") or line.startswith("<HTML"):
+                yield ("error", {
+                    "message": f"DeepSeek returned HTML error: {line[:200]}",
+                    "code": "html_response"
+                })
+                return
+
+            if non_json_line_count >= 3:
+                yield ("error", {
+                    "message": f"DeepSeek returned non-SSE text (too many non-JSON lines): first={line[:200]}",
+                    "code": "non_sse_response"
+                })
+                return
+
+            # Non-SSE JSON error object
             if line.startswith("{"):
                 try:
                     obj = json.loads(line)
@@ -2010,6 +2057,12 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
                 if not isinstance(obj, dict):
                     continue
 
+                # Direct type=error check (non-SSE error format)
+                obj_type = obj.get("type", "")
+                if obj_type == "error":
+                    yield ("error", {"message": obj.get("content", ""), "code": obj.get("finish_reason", "")})
+                    return
+
                 val = obj.get("v")
 
                 # Toast/metadata (v is dict)
@@ -2024,58 +2077,62 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
                     if isinstance(resp_data, dict):
                         frags = resp_data.get("fragments", [])
                         if frags and isinstance(frags, list):
-                            last = frags[-1]
-                            if isinstance(last, dict) and last.get("type"):
-                                fragment_type = last["type"]
-                    continue
-
-                # Fragments metadata (v is list containing fragment type info)
-                if isinstance(val, list) and obj.get("o") == "APPEND" and "fragments" in obj.get("p", ""):
-                    for item in val:
-                        if isinstance(item, dict) and item.get("type"):
-                            fragment_type = item["type"]
-                            if fragment_type == "RESPONSE":
-                                _content_seen = True
+                            last_frag = frags[-1]
+                            if isinstance(last_frag, dict) and last_frag.get("type"):
+                                fragment_type = last_frag["type"]
                     continue
 
                 path = obj.get("p", "")
+
+                # ── New format: response/fragments (initial metadata + content) ──
+                if path == "response/fragments" and obj.get("o") == "APPEND" and isinstance(val, list):
+                    if val:
+                        last_frag = val[-1] if isinstance(val[-1], dict) else {}
+                        new_type = last_frag.get("type", "")
+                        if new_type:
+                            fragment_type = new_type
+                        frag_content = last_frag.get("content", "")
+                        if frag_content and isinstance(frag_content, str):
+                            v_stripped = frag_content
+                            if fragment_type == "THINK" and thinking_enabled:
+                                if _first_th:
+                                    v_stripped = v_stripped.lstrip(_artifact)
+                                    if not v_stripped: continue
+                                    _first_th = False
+                                yield ("thinking", v_stripped)
+                            elif fragment_type == "RESPONSE":
+                                if _first_ct:
+                                    v_stripped = v_stripped.lstrip(_artifact)
+                                    if not v_stripped: continue
+                                    _first_ct = False
+                                yield ("content", v_stripped)
+                    continue
+
+                # ── Fragment content continuation: response/fragments/-1/content ──
+                if path == "response/fragments/-1/content":
+                    if not isinstance(val, str) or not val:
+                        continue
+                    if fragment_type == "THINK" and thinking_enabled:
+                        if _first_th:
+                            val = val.lstrip(_artifact)
+                            if not val: continue
+                            _first_th = False
+                        yield ("thinking", val)
+                    else:
+                        if _first_ct:
+                            val = val.lstrip(_artifact)
+                            if not val: continue
+                            _first_ct = False
+                        yield ("content", val)
+                    continue
+
                 v = obj.get("v", "")
                 if not isinstance(v, str) or not v:
                     continue
 
-                # ── Fragments format (vision/reasoner models) ──
-                if path and "fragments" in path:
-                    if fragment_type is None:
-                        if thinking_enabled:
-                            if _first_th:
-                                v = v.lstrip(_artifact)
-                                if not v: continue
-                                _first_th = False
-                            yield ("thinking", v)
-                        else:
-                            if _first_ct:
-                                v = v.lstrip(_artifact)
-                                if not v: continue
-                                _first_ct = False
-                            yield ("content", v)
-                    elif fragment_type == "THINK" and thinking_enabled:
-                        if _first_th:
-                            v = v.lstrip(_artifact)
-                            if not v: continue
-                            _first_th = False
-                        yield ("thinking", v)
-                    elif fragment_type == "RESPONSE":
-                        if _first_ct:
-                            v = v.lstrip(_artifact)
-                            if not v: continue
-                            _first_ct = False
-                        yield ("content", v)
-                    continue
-
-                # ── Old format ──
+                # ── Old format: response/content ──
                 if path == "response/content" and obj.get("o") == "APPEND":
                     phase = "content"
-                    _content_seen = True
                     if _first_ct:
                         v = v.lstrip(_artifact)
                         if not v: continue
@@ -2091,25 +2148,35 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
                 elif path:
                     continue
                 elif isinstance(v, str) and v:
-                    if _content_seen:
-                        if _first_ct:
-                            v = v.lstrip(_artifact)
-                            if not v: continue
-                            _first_ct = False
-                        yield ("content", v)
-                    elif phase == "thinking" and thinking_enabled:
-                        if _first_th:
-                            v = v.lstrip(_artifact)
-                            if not v: continue
-                            _first_th = False
-                        yield ("thinking", v)
+                    # Pathless continuation lines — use fragment_type if new format else phase
+                    if fragment_type is not None:
+                        if fragment_type == "THINK" and thinking_enabled:
+                            if _first_th:
+                                v = v.lstrip(_artifact)
+                                if not v: continue
+                                _first_th = False
+                            yield ("thinking", v)
+                        else:
+                            if _first_ct:
+                                v = v.lstrip(_artifact)
+                                if not v: continue
+                                _first_ct = False
+                            yield ("content", v)
                     else:
-                        if _first_ct:
-                            v = v.lstrip(_artifact)
-                            if not v: continue
-                            _first_ct = False
-                        yield ("content", v)
+                        if phase == "thinking" and thinking_enabled:
+                            if _first_th:
+                                v = v.lstrip(_artifact)
+                                if not v: continue
+                                _first_th = False
+                            yield ("thinking", v)
+                        else:
+                            if _first_ct:
+                                v = v.lstrip(_artifact)
+                                if not v: continue
+                                _first_ct = False
+                            yield ("content", v)
             except json.JSONDecodeError:
+                non_json_line_count += 1
                 continue
 
     def do_stream():
@@ -2142,10 +2209,31 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
                 return
 
             if has_tools:
+                # 渐进式缓冲：先缓冲前60字符判断是否为TOOL_CALL，确认非工具后实时流式输出
                 buf_content = ""
+                _role_sent = False
+                _content_streaming = False
                 for etype, val in _parse_sse(resp):
                     if etype == "content":
                         buf_content += val
+                        if not _role_sent:
+                            r = {"id": chat_id, "object": "chat.completion.chunk", "created": created, "model": model,
+                                 "choices": [{"index": 0, "delta": {"role": "assistant", "content": None}, "finish_reason": None}]}
+                            yield f'data: {json.dumps(r, ensure_ascii=False)}\n\n'
+                            _role_sent = True
+                        if not _content_streaming:
+                            stripped = buf_content.lstrip()
+                            if stripped.upper().startswith("TOOL_CALL") or stripped.upper().startswith("TOOL_"):
+                                continue
+                            if len(buf_content) > 60:
+                                _content_streaming = True
+                                r = {"id": chat_id, "object": "chat.completion.chunk", "created": created, "model": model,
+                                     "choices": [{"index": 0, "delta": {"content": buf_content}, "finish_reason": None}]}
+                                yield f'data: {json.dumps(r, ensure_ascii=False)}\n\n'
+                        else:
+                            r = {"id": chat_id, "object": "chat.completion.chunk", "created": created, "model": model,
+                                 "choices": [{"index": 0, "delta": {"content": val}, "finish_reason": None}]}
+                            yield f'data: {json.dumps(r, ensure_ascii=False)}\n\n'
                     elif etype == "thinking":
                         r = {"id": chat_id, "object": "chat.completion.chunk", "created": created, "model": model,
                              "choices": [{"index": 0, "delta": {"reasoning_content": val}, "finish_reason": None}]}
@@ -2156,11 +2244,15 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
                         return
                     elif etype == "done":
                         break
+                # 处理剩余缓冲（短回复或 TOOL_CALL）
+                if buf_content and not _content_streaming:
+                    tc_result, _ = extract_tool_call(buf_content, get_tool_names(tools) if tools else None)
+                    if not tc_result:
+                        r = {"id": chat_id, "object": "chat.completion.chunk", "created": created, "model": model,
+                             "choices": [{"index": 0, "delta": {"content": buf_content}, "finish_reason": None}]}
+                        yield f'data: {json.dumps(r, ensure_ascii=False)}\n\n'
                 tc_result, final_content = extract_tool_call(buf_content, get_tool_names(tools) if tools else None)
                 if tc_result:
-                    r = {"id": chat_id, "object": "chat.completion.chunk", "created": created, "model": model,
-                         "choices": [{"index": 0, "delta": {"role": "assistant", "content": None}, "finish_reason": None}]}
-                    yield f'data: {json.dumps(r, ensure_ascii=False)}\n\n'
                     for i, tc in enumerate(tc_result):
                         delta = {"role": "assistant", "content": None,
                                  "tool_calls": [{"index": i, "id": tc["id"], "type": "function",
@@ -2176,18 +2268,20 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
                          "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}
                     yield f'data: {json.dumps(r, ensure_ascii=False)}\n\n'
                 else:
-                    if buf_content:
-                        r = {"id": chat_id, "object": "chat.completion.chunk", "created": created, "model": model,
-                             "choices": [{"index": 0, "delta": {"content": buf_content}, "finish_reason": None}]}
-                        yield f'data: {json.dumps(r, ensure_ascii=False)}\n\n'
                     r = {"id": chat_id, "object": "chat.completion.chunk", "created": created, "model": model,
                          "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}
                     yield f'data: {json.dumps(r, ensure_ascii=False)}\n\n'
                 yield "data: [DONE]\n\n"
                 return
 
+            _role_sent = False
             for etype, val in _parse_sse(resp):
                 if etype == "content":
+                    if not _role_sent:
+                        r = {"id": chat_id, "object": "chat.completion.chunk", "created": created, "model": model,
+                             "choices": [{"index": 0, "delta": {"role": "assistant", "content": None}, "finish_reason": None}]}
+                        yield f'data: {json.dumps(r, ensure_ascii=False)}\n\n'
+                        _role_sent = True
                     r = {"id": chat_id, "object": "chat.completion.chunk", "created": created, "model": model,
                          "choices": [{"index": 0, "delta": {"content": val}, "finish_reason": None}]}
                     yield f'data: {json.dumps(r, ensure_ascii=False)}\n\n'
