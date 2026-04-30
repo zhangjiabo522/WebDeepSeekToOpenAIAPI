@@ -1903,6 +1903,8 @@ async def chat(request: Request):
     t0 = time.time()
     result = _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream,
                     is_retry=False, has_tools=bool(tools), tools=tools, ref_file_ids=ref_file_ids)
+    if ref_file_ids:
+        return result  # 视觉请求直接用原始StreamingResponse，避免_track_and_return线程池死锁
     return _track_and_return(result, t0, model, stream, input_tokens)
 
 
