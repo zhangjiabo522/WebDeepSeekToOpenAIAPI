@@ -288,7 +288,8 @@ def _load_settings() -> dict:
         "account_strategy": "random",
         "api_key": "sk-default",
         "default_model": "deepseek-chat",
-        "x_client_version": "2.0.2",
+        "x_client_version": "1.0.0-always",
+        "force_default_model_type": False,
     }
     if SETTINGS_FILE.exists():
         try:
@@ -306,7 +307,7 @@ def _save_settings(settings: dict):
 def _get_client_version() -> str:
     """获取当前 x-client-version，优先使用设置中配置的版本。"""
     settings = _load_settings()
-    return settings.get("x_client_version", "2.0.2").strip() or "2.0.2"
+    return settings.get("x_client_version", "1.0.0-always").strip() or "1.0.0-always"
 
 
 # ── FastAPI ────────────────────────────────────────────
@@ -482,8 +483,16 @@ hr{border:none;border-top:1px solid #334155;margin:16px 0}
   </div>
   <div class="card">
     <div class="card-title">X-Client-Version</div>
-    <div style="font-size:12px;color:#64748b;margin-bottom:8px">与 DeepSeek 网页端版本一致（当前默认 2.0.2），遇到 "Update to the latest version to use Expert/Vision" 时请更新</div>
-    <input type="text" id="xClientVersion" placeholder="2.0.2">
+    <div style="font-size:12px;color:#64748b;margin-bottom:8px">与 DeepSeek 网页端版本一致（当前默认 1.0.0-always），遇到 "Update to the latest version to use Expert/Vision" 时请更新</div>
+    <input type="text" id="xClientVersion" placeholder="1.0.0-always">
+  </div>
+  <div class="card">
+    <div class="card-title">强制 Default Model Type</div>
+    <div style="font-size:12px;color:#64748b;margin-bottom:8px">账号未收到灰度（Expert/Vision 被拒）时开启，所有请求用 default 模型类型</div>
+    <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#e2e8f0">
+      <input type="checkbox" id="forceDefaultModelType" style="width:auto">
+      强制使用 default（未灰度账号必须开启）
+    </label>
   </div>
   <div class="card">
     <div class="card-title">修改管理密码</div>
@@ -719,7 +728,8 @@ async function loadSettings(){
     $('defaultModel').value=d.default_model||'deepseek-chat';
     $('chatModel').value=d.default_model||'deepseek-chat';
     $('apiKey').value=d.api_key||'sk-default';
-    $('xClientVersion').value=d.x_client_version||'2.0.2';
+    $('xClientVersion').value=d.x_client_version||'1.0.0-always';
+    $('forceDefaultModelType').checked=d.force_default_model_type||false;
   }catch(e){}
 }
 async function saveSettings(){
@@ -729,6 +739,7 @@ async function saveSettings(){
     default_model:$('defaultModel').value,
     api_key:$('apiKey').value,
     x_client_version:$('xClientVersion').value,
+    force_default_model_type:$('forceDefaultModelType').checked,
   };
   try{
     const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
@@ -1154,7 +1165,8 @@ async def save_settings(data: dict):
     s["account_strategy"] = data.get("account_strategy", s.get("account_strategy", "random"))
     s["api_key"] = data.get("api_key", s.get("api_key", "sk-default"))
     s["default_model"] = data.get("default_model", s.get("default_model", "deepseek-chat"))
-    s["x_client_version"] = data.get("x_client_version", s.get("x_client_version", "2.0.2"))
+    s["x_client_version"] = data.get("x_client_version", s.get("x_client_version", "1.0.0-always"))
+    s["force_default_model_type"] = data.get("force_default_model_type", s.get("force_default_model_type", False))
     _save_settings(s)
     log_info("设置已保存")
     return {"ok": True}
@@ -1964,8 +1976,12 @@ def _do_chat(cfg, prompt, model, thinking_enabled, search_enabled, stream, is_re
         "thinking_enabled": thinking_enabled,
         "search_enabled": search_enabled,
     }
-    # 设置 model_type
-    if ref_file_ids:
+    # 设置 model_type，灰度未覆盖时自动回退 default
+    # 设置 model_type：灰度未覆盖账号可开启 force_default_model_type
+    settings = _load_settings()
+    if settings.get("force_default_model_type"):
+        req_body["model_type"] = "default"
+    elif ref_file_ids or "vision" in model:
         req_body["model_type"] = "vision"
     elif "expert" in model:
         req_body["model_type"] = "expert"
