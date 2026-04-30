@@ -1927,9 +1927,9 @@ def _track_and_return(result, t0, model, stream, input_tokens):
     if isinstance(result, StreamingResponse):
         orig_iter = result.body_iterator
 
-        async def _counting_iter():
+        def _counting_iter():
             buf = ""
-            async for chunk in orig_iter:
+            for chunk in orig_iter:
                 if isinstance(chunk, bytes):
                     chunk = chunk.decode("utf-8", errors="ignore")
                 buf += chunk
